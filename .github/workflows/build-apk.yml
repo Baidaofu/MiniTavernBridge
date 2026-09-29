@@ -47,8 +47,16 @@ jobs:
 
       - name: Install SDK components
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          # GitHub runner 预装了 Android SDK，但 cmdline-tools/bin 通常不在 PATH，
+          # 直接调 sdkmanager 会 command not found。
+          SDKMANAGER="$(find "${ANDROID_HOME:-$HOME/Android/Sdk}" -name sdkmanager -type f -path '*/bin/*' 2>/dev/null | head -1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found under ${ANDROID_HOME:-$HOME/Android/Sdk}"
+            exit 1
+          fi
+          echo "using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Write local.properties
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
