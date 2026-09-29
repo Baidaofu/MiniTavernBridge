@@ -87,12 +87,15 @@ class Extractor(
             regions.forEachIndexed { i, r ->
                 append("dd if=/proc/$pid/mem of=\$D/$i.bin bs=4096 skip=${r.first / 4096} count=${(r.last - r.first) / 4096} 2>/dev/null\n")
             }
-            append("cat \$D/*.bin > \$D/all.bin 2>/dev/null\nrm -f \$D/*.bin\necho \$D/all.bin\n")
+            // 注意：清理时必须用 [0-9]*.bin，不能用 *.bin，
+            // 否则通配符会把刚合并出的输出文件一并删掉。
+            append("cat \$D/*.bin > \$D/all.dat 2>/dev/null\n")
+            append("rm -f \$D/[0-9]*.bin\necho \$D/all.dat\n")
         }
         RootShell.run("cat > $dir.sh", stdin = script)
         RootShell.run("chmod 755 $dir.sh")
         val path = RootShell.run("sh $dir.sh", timeoutMs = 180_000)
-            .out.trim().lines().lastOrNull { it.endsWith("all.bin") } ?: return ByteArray(0)
+            .out.trim().lines().lastOrNull { it.endsWith("all.dat") } ?: return ByteArray(0)
         val raw = RootShell.run("cat $path", timeoutMs = 180_000).out
         RootShell.run("rm -rf $dir $dir.sh")
         return raw.toByteArray(Charsets.ISO_8859_1)
