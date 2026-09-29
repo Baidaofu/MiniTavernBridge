@@ -17,9 +17,38 @@ android {
         vectorDrawables { useSupportLibrary = true }
     }
 
+    // release 签名信息从环境变量 / Gradle 属性读取，不写入仓库。
+    // CI 上由 GitHub Secrets 注入；本地可从环境变量或 ~/.gradle/gradle.properties 提供。
+    signingConfigs {
+        create("release") {
+            val storePath = (System.getenv("KEYSTORE_PATH")
+                ?: providers.gradleProperty("KEYSTORE_PATH").orNull
+                ?: "keystore/release.keystore")
+            // file() 在 app 模块内是相对 app/ 解析的，这里统一挂到 rootDir 下
+            storeFile = file(rootProject.file(storePath))
+            storePassword = (System.getenv("KEYSTORE_PASSWORD")
+                ?: providers.gradleProperty("KEYSTORE_PASSWORD").orNull)
+            keyAlias = (System.getenv("KEY_ALIAS")
+                ?: providers.gradleProperty("KEY_ALIAS").orNull)
+            keyPassword = (System.getenv("KEY_PASSWORD")
+                ?: providers.gradleProperty("KEY_PASSWORD").orNull
+                ?: System.getenv("KEYSTORE_PASSWORD"))
+            // 签名信息缺失时不要拖垮 debug 构建
+            if (storePassword == null || keyAlias == null) {
+                logger.lifecycle("[mtbridge] release 签名信息缺失，assembleRelease 不可用")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            // 仅在签名信息齐备时启用；否则 release 会构建出未签名包
+            if (System.getenv("KEYSTORE_PASSWORD") != null ||
+                providers.gradleProperty("KEYSTORE_PASSWORD").isPresent
+            ) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         debug {

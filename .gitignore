@@ -32,3 +32,9 @@ mtbridge.log
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ---------- 签名密钥：绝不提交 ----------
+*.keystore
+*.jks
+KEYSTORE_INFO.md
+keystore/
