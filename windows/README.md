@@ -1,0 +1,155 @@
+# mtbridge — Windows 命令行版
+
+把 MiniTavern 会员代理包装成 OpenAI 兼容端点。零第三方依赖，只用 Python 标准库。
+
+安卓版见 [`../android`](../android)（功能一致，UI 为 Material 3）。
+
+---
+
+## 快速开始
+
+```bash
+# 1. 复制配置模板
+copy config.example.json config.json
+
+# 2. 编辑 config.json，填入 uuid 和 clientId
+
+# 3. 自检（配置合法性 + 上游连通性 + 端口占用）
+python mtbridge.py --check
+
+# 4. 启动
+python mtbridge.py
+```
+
+客户端里填：
+
+```
+Base URL   http://127.0.0.1:8787/v1
+API Key    任意字符串
+Path       /chat/completions
+```
+
+---
+
+## 命令
+
+| 命令 | 作用 |
+|---|---|
+| `python mtbridge.py` | 用 `./config.json` 启动服务 |
+| `python mtbridge.py -c other.json` | 指定配置文件 |
+| `python mtbridge.py --check` | 只做配置 / 网络 / 端口自检后退出 |
+| `python mtbridge.py --test` | 启动并对各端点发一次真实请求 |
+| `python mtbridge.py --active "手机B"` | 切换活动账户并写回配置 |
+| `python mtbridge.py -v` | 打开调试日志 |
+
+---
+
+## 配置说明
+
+**所有参数都从 `config.json` 读取，代码里没有写死的地址、端口或凭据。**
+
+```jsonc
+{
+  "listen": {
+    "host": "127.0.0.1",   // 改成 0.0.0.0 可让局域网访问（注意无鉴权）
+    "port": 8787
+  },
+  "upstream": {
+    "base": "https://monitor.mini-tavern.com"
+  },
+
+  "request_timeout_seconds": 300,   // 上游请求超时
+  "model_cache_ttl_seconds": 300,   // 模型目录缓存时长
+  "verify_tls": true,               // 关掉可跳过证书校验（自签代理场景）
+  "verbose": false,
+
+  "active": "手机B",                 // 当前活动账户的 label
+
+  "accounts": [
+    {
+      "label": "手机B",              // 唯一标识，用于 --active 切换
+      "uuid": "b1d7772c…",          // 必需，账户凭据
+      "clientId": "68cd199d…",      // 必需
+      "enabled": true               // false 则跳过（用于临时停用某账户）
+    }
+  ]
+}
+```
+
+### 怎么拿 `uuid`
+
+用安卓端的 **MiniTavern Bridge** App 点「扫描设备」，它会从 MiniTavern 进程内存里
+提取。或者手动从 `token.txt` / 任意一次抓包中取 JWT payload 的 `uuid` 字段。
+
+`clientId` 实测在**所有设备、所有安装上完全相同**，是从 App 本身派生的常量。
+
+---
+
+## 多账户
+
+`accounts` 数组可以有任意多个账户。切换：
+
+```bash
+python mtbridge.py --active phoneA
+```
+
+切换会写回 `config.json`，服务本身无需重启（每次请求都实时读取）。
+
+也可以直接编辑 `active` 字段，效果相同。
+
+> 每个账户的配额独立计数，实测互不影响。
+
+---
+
+## 端点
+
+| 端点 | 用途 |
+|---|---|
+| `GET /v1/models` | OpenAI 标准模型列表 |
+| `GET /v1/models/{id}` | 单模型查询 |
+| `POST /v1/chat/completions` | 聊天 |
+| `GET /v1/status` | 服务状态、当前账户、累计请求数 |
+| `GET /v1/accounts` | 账户列表及各账户最近配额 |
+| `OPTIONS *` | CORS 预检 |
+
+后三个是本程序附加的，方便脚本查询。
+
+---
+
+## 认证模型（实测结论）
+
+| 凭据 | 是否必需 | 说明 |
+|---|---|---|
+| `X-Client-Id` | **是** | 缺失或错误 → `用户不存在` (401) |
+| body `uuid` | **是** | 缺失 → `uuid should not be empty` |
+| `Authorization: Bearer <JWT>` | **否** | 后端完全忽略，**本程序不发送** |
+
+第 3 点意味着：
+
+- **客户端不需要填真实 API Key**，随便填即可
+- token 过期不影响任何调用
+- `uuid` 是唯一的账户凭据，等同密码，**不要外传**
+
+---
+
+## 已知限制
+
+- **不支持流式增量转发。** 后端返回 `stream: true` 时，本程序会一次性读完再返回，
+  客户端需要等生成完毕。客户端侧**保持默认非流式**体验最一致。
+- **上下文窗口未知。** 后端不返回该信息，客户端配置需手填。
+- **`gpt-5.4` / `gpt-6-astra` 有隐藏注入。** 同样的短请求，这两个模型
+  `prompt_tokens` 约 550，而 `deepseek` 只有 9。服务端为这两条线路注入了
+  约 540 token 的 system prompt，不是「官方 gpt-5.4」。
+- **配额重置时间后端未提供。** `GET /api/users/getAdQuota` 返回
+  `{"quota":0,"time":0}`，无实际信息。
+
+---
+
+## 合规提示
+
+本工具绕过 MiniTavern App 的设备签名校验（后端 `/api/auth/app/metrics`
+持续统计 `signature_ok` / `signature_fail` / `nonce_replay`）。
+**这实质上违反其服务条款，封号风险由使用者自行承担。**
+
+`config.json` 里的 `uuid` 等同于账户密码，请勿提交到公开仓库
+（`.gitignore` 已排除）。

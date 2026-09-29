@@ -1,0 +1,34 @@
+# ---------- secrets / local config ----------
+config.json
+*.local.json
+local.properties
+token.txt
+token_B.txt
+token_new*.txt
+apiSettings*.json
+apiSettings*.enc
+creds.json
+
+# ---------- Android build ----------
+.gradle/
+build/
+app/build/
+*.apk
+*.aab
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+# ---------- Windows ----------
+__pycache__/
+*.pyc
+mtbridge.log
+*.log
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+desktop.ini

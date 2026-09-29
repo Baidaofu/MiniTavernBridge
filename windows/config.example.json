@@ -1,0 +1,31 @@
+{
+  "_comment": "复制为 config.json 后填入你自己的信息。所有字段都有含义，代码里没有写死的默认值。",
+
+  "listen": {
+    "_comment": "本地监听地址与端口。host 改成 0.0.0.0 可让局域网其他设备访问（注意：代理不鉴权）",
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+
+  "upstream": {
+    "_comment": "MiniTavern 后端地址",
+    "base": "https://monitor.mini-tavern.com"
+  },
+
+  "request_timeout_seconds": 300,
+  "model_cache_ttl_seconds": 300,
+  "verify_tls": true,
+  "verbose": false,
+
+  "active": "改成下面某个 label",
+
+  "accounts": [
+    {
+      "label": "示例账户",
+      "_comment": "uuid 可用 android 端 App 的「扫描设备」获取；clientId 实测在所有设备上相同",
+      "uuid": "在这里填 64 位十六进制 uuid",
+      "clientId": "在这里填 clientId",
+      "enabled": true
+    }
+  ]
+}
