@@ -2,7 +2,6 @@ package dev.mtbridge.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,7 +19,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -47,7 +45,7 @@ import androidx.compose.ui.unit.dp
 import dev.mtbridge.app.core.Account
 import dev.mtbridge.app.core.MiniTavernApi
 
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     rootOk: Boolean,
@@ -157,11 +155,32 @@ fun HomeScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         } else {
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                models.forEach { m ->
-                                    AssistChip(onClick = {}, label = {
-                                        Text(m.id, style = MaterialTheme.typography.labelSmall)
-                                    })
+                            // 短 id → 完整模型名的映射表
+                            models.forEach { m ->
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        m.id,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.width(132.dp),
+                                    )
+                                    Text(
+                                        "→",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline,
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        m.name,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace,
+                                    )
                                 }
                             }
                         }
