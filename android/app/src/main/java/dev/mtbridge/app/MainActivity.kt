@@ -8,11 +8,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
+import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -159,23 +159,22 @@ class MainActivity : ComponentActivity() {
         Scaffold(
             bottomBar = {
                 NavigationBar {
-                    val items = listOf(
+                    listOf(
                         Triple("首页", Icons.Default.Home, Icons.Default.Home),
                         Triple("账户", Icons.Default.Person, Icons.Default.Person),
                         Triple("日志", Icons.Default.Terminal, Icons.Default.Terminal),
-                    )
-                    items.forEachIndexed { i, (label, on, _) ->
+                    ).forEachIndexed { i, item ->
                         NavigationBarItem(
                             selected = tab == i,
                             onClick = { tab = i },
-                            icon = { Icon(on, label) },
-                            label = { Text(label) },
+                            icon = { Icon(item.second, item.first) },
+                            label = { Text(item.first) },
                         )
                     }
                 }
             }
         ) { pad ->
-            androidx.compose.foundation.layout.Box(Modifier.padding(pad)) {
+            Box(Modifier.padding(pad)) {
                 when (tab) {
                     0 -> HomeScreen(
                         rootOk = rootOk,

@@ -2,12 +2,15 @@ package dev.mtbridge.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -69,18 +72,36 @@ fun AccountsScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { showAdd = true }, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Default.Add, null)
-                        Text(" 手动添加")
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = { showAdd = true },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp),
+                    ) {
+                        Icon(Icons.Default.Add, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("添加", maxLines = 1, softWrap = false)
                     }
-                    OutlinedButton(onClick = onImport, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Default.Upload, null)
-                        Text(" 导入")
+                    OutlinedButton(
+                        onClick = onImport,
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp),
+                    ) {
+                        Icon(Icons.Default.Upload, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("导入", maxLines = 1, softWrap = false)
                     }
-                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Default.FileDownload, null)
-                        Text(" 导出")
+                    OutlinedButton(
+                        onClick = onExport,
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp),
+                    ) {
+                        Icon(Icons.Default.FileDownload, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("导出", maxLines = 1, softWrap = false)
                     }
                 }
             }
