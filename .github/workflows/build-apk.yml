@@ -61,6 +61,10 @@ jobs:
       - name: Write local.properties
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
+      # 从 Windows 提交时 git 不会记录可执行位，这里补上，否则 gradlew 会 126
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
       - name: Build
         run: ./gradlew assembleDebug --no-daemon
 
