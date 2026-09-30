@@ -193,3 +193,75 @@ curl -s https://monitor.mini-tavern.com/api/api-keys/list \
 **这实质上违反其服务条款，封号风险由使用者自行承担。**
 
 仅供个人学习与研究。
+
+---
+
+## 发布
+
+**发布是手动的**，仓库里没有自动发版的工作流。CI 只负责构建与验证：
+
+| 工作流 | 触发 | 做什么 |
+|---|---|---|
+| `build-apk.yml` | push/PR/手动 | 构建 debug + 已签名 release APK，上传为 artifact |
+
+`permissions: contents: read`，不碰任何发布动作。
+
+### 手动发布的步骤
+
+1. **改版本号** —— `android/app/build.gradle.kts` 里 `versionName` 和
+   `versionCode` 一起递增（前者决定 tag，后者是 Android 内部整数）
+
+   ```kotlin
+   versionCode = 2
+   versionName = "1.1.0"
+   ```
+
+2. **推送并等 CI 跑完** —— Actions 里确认 `Build APK` 是绿色的，
+   从 run 页下载 `minitavern-bridge-release` artifact
+
+3. **打 tag 并上传**
+
+   ```bash
+   git tag -a v1.1.0 -m "1.1.0"
+   git push origin v1.1.0
+   # 或直接在 GitHub 上新建 Release，拖入 artifact 里的
+   # app-release.apk，改名为 mtbridge-1.1.0.apk
+   ```
+
+4. **Windows 包**（可选）—— 手工打包：
+
+   ```bash
+   cd windows
+   zip mtbridge-1.1.0.zip mtbridge.py mtbridge_tui.py \
+       config.example.json README.md TUI.md
+   ```
+
+### 为什么不做自动化
+
+之前试过用 workflow 自动发，试下来的结论是**不划算**：
+
+- 发出去的说明是静态文本，除非额外做 changelog 生成，否则每次都一样
+- 自动发版意味着每次推送都用签名密钥，误推送无法拦截
+- 真正需要人工判断的（这次改了什么、怎么写说明）恰恰没法自动化
+
+改成手动后，说明可以每次按实际情况写，反而更贴切。
+
+### 签名
+
+release 包的签名走 GitHub Actions Secrets：
+
+| Secret | 内容 |
+|---|---|
+| `KEYSTORE_B64` | keystore 的 base64 |
+| `KEYSTORE_PASSWORD` | 密钥库口令（也是 key 口令） |
+| `KEY_ALIAS` | 密钥别名 |
+
+只有 `build-apk.yml` 的 release job 会用到它们，条件是 `push` 到 `main`；
+PR（含 fork）拿不到 secrets。新增密钥时用：
+
+```bash
+base64 -w0 baidaofu.keystore | pbcopy   # 填入 KEYSTORE_B64
+```
+
+`verify-tls` 之类的本地配置不进仓库，`.gitignore` 已排除
+`config.json`、`*.keystore`、`KEYSTORE_INFO.md` 等敏感文件。
