@@ -3,10 +3,19 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#00897B"
-        android:pathData="M0,0h108v108h-108z" />
+
+    <!--
+        主题图标（themed icons / monochrome）把这个层整体转成单色剪影，
+        因此只放图形，绝不铺满 viewport —— 铺满会变成一个纯色方块。
+        背景色由 <background> 层提供。
+        图形限制在 21..87 的安全区内（自适应图标中心 66dp 直径）。
+    -->
+
+    <!-- 盾牌 + 内部镂空的双向箭头（代理/转发） -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M54,26L34,35v16c0,14.8 8.7,28.6 20,32 11.3,-3.4 20,-17.2 20,-32V35L54,26zM54,50h14c-0.7,11 -8.2,20.6 -14,23.4V50H40V40.6L54,32.8V50z" />
+        android:fillType="evenOdd"
+        android:pathData="M54,26 L30,35 v20 c0,17 10.3,32.3 24,36.3 c13.7,-4 24,-19.3 24,-36.3 V35 Z
+                          M54,42 L62.5,53.5 H57.5 V59.5 H50.5 V53.5 H45.5 Z
+                          M54,80 L45.5,68.5 H50.5 V62.5 H57.5 V68.5 H62.5 Z" />
 </vector>

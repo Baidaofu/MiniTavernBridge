@@ -13,11 +13,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Radar
-import androidx.compose.material.icons.filled.Stop
+import dev.mtbridge.app.ui.icons.PlayArrow
+import dev.mtbridge.app.ui.icons.Refresh
+import dev.mtbridge.app.ui.icons.Radar
+import dev.mtbridge.app.ui.icons.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -91,14 +90,14 @@ fun HomeScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (proxyRunning) {
                                 FilledTonalButton(onClick = onStopProxy) {
-                                    Icon(Icons.Default.Stop, null); Text(" 停止代理")
+                                    Icon(Stop, null); Text(" 停止代理")
                                 }
                             } else {
                                 Button(
                                     onClick = onStartProxy,
                                     enabled = account != null,
                                 ) {
-                                    Icon(Icons.Default.PlayArrow, null); Text(" 启动代理")
+                                    Icon(PlayArrow, null); Text(" 启动代理")
                                 }
                             }
                             OutlinedButton(onClick = { showPort = true }) { Text("端口") }
@@ -128,7 +127,7 @@ fun HomeScreen(
                                 )
                                 Text(" 扫描中…")
                             } else {
-                                Icon(Icons.Default.Radar, null); Text(" 扫描设备")
+                                Icon(Radar, null); Text(" 扫描设备")
                             }
                         }
                     }
@@ -145,7 +144,7 @@ fun HomeScreen(
                         ) {
                             Text("可用模型 (${models.size})", style = MaterialTheme.typography.titleMedium)
                             IconButton(onClick = onRefreshModels, enabled = account != null) {
-                                Icon(Icons.Default.Refresh, "刷新")
+                                Icon(Refresh, "刷新")
                             }
                         }
                         if (models.isEmpty()) {

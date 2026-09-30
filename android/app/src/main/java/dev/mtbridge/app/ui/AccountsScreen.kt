@@ -14,15 +14,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.RadioButtonChecked
-import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.filled.Upload
+import dev.mtbridge.app.ui.icons.Add
+import dev.mtbridge.app.ui.icons.BugReport
+import dev.mtbridge.app.ui.icons.Delete
+import dev.mtbridge.app.ui.icons.Download
+import dev.mtbridge.app.ui.icons.Edit
+import dev.mtbridge.app.ui.icons.RadioButtonChecked
+import dev.mtbridge.app.ui.icons.RadioButtonUnchecked
+import dev.mtbridge.app.ui.icons.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -112,7 +111,7 @@ fun AccountsScreen(
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(horizontal = 4.dp),
                     ) {
-                        Icon(Icons.Default.Add, null, Modifier.size(18.dp))
+                        Icon(Add, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("添加", maxLines = 1, softWrap = false)
                     }
@@ -122,7 +121,7 @@ fun AccountsScreen(
                         contentPadding = PaddingValues(horizontal = 4.dp),
                     ) {
                         // 数据流入应用 = 下载箭头
-                        Icon(Icons.Default.Download, null, Modifier.size(18.dp))
+                        Icon(Download, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("导入", maxLines = 1, softWrap = false)
                     }
@@ -132,7 +131,7 @@ fun AccountsScreen(
                         contentPadding = PaddingValues(horizontal = 4.dp),
                     ) {
                         // 数据流出应用 = 上传箭头
-                        Icon(Icons.Default.Upload, null, Modifier.size(18.dp))
+                        Icon(Upload, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("导出", maxLines = 1, softWrap = false)
                     }
@@ -152,7 +151,7 @@ fun AccountsScreen(
                             onClick = onNewTestAccount,
                             contentPadding = PaddingValues(horizontal = 12.dp),
                         ) {
-                            Icon(Icons.Default.BugReport, null, Modifier.size(18.dp))
+                            Icon(BugReport, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("调试账户", maxLines = 1, softWrap = false)
                         }
@@ -189,8 +188,8 @@ fun AccountsScreen(
                     ) {
                         IconButton(onClick = { onSelect(acc.uuid) }) {
                             Icon(
-                                if (isActive) Icons.Default.RadioButtonChecked
-                                else Icons.Default.RadioButtonUnchecked,
+                                if (isActive) RadioButtonChecked
+                                else RadioButtonUnchecked,
                                 contentDescription = "选择",
                                 tint = if (isActive) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.outline,
@@ -215,11 +214,11 @@ fun AccountsScreen(
                             )
                         }
                         IconButton(onClick = { onEdit(acc) }) {
-                            Icon(Icons.Default.Edit, "编辑")
+                            Icon(Edit, "编辑")
                         }
                         IconButton(onClick = { pendingDelete = acc }) {
                             Icon(
-                                Icons.Default.Delete, "删除",
+                                Delete, "删除",
                                 tint = MaterialTheme.colorScheme.error,
                             )
                         }

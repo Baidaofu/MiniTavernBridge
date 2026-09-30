@@ -7,10 +7,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Terminal
+import dev.mtbridge.app.ui.icons.Home
+import dev.mtbridge.app.ui.icons.Person
+import dev.mtbridge.app.ui.icons.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.NavigationBar
@@ -164,9 +163,9 @@ class MainActivity : ComponentActivity() {
             bottomBar = {
                 NavigationBar {
                     listOf(
-                        Triple("首页", Icons.Default.Home, Icons.Default.Home),
-                        Triple("账户", Icons.Default.Person, Icons.Default.Person),
-                        Triple("日志", Icons.Default.Terminal, Icons.Default.Terminal),
+                        Triple("首页", Home, Home),
+                        Triple("账户", Person, Person),
+                        Triple("日志", Terminal, Terminal),
                     ).forEachIndexed { i, item ->
                         NavigationBarItem(
                             selected = tab == i,
