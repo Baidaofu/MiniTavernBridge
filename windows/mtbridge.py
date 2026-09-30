@@ -47,6 +47,9 @@ __version__ = "1.0.0"
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "config.json"
 
+# 实测在所有设备、所有安装上完全相同，是 App 派生的常量
+DEFAULT_CLIENT_ID = "68cd199d61947054fdf25ebe"
+
 
 # --------------------------------------------------------------------- 配置
 
@@ -116,13 +119,73 @@ class Config:
 
     def save_active(self, label: str) -> None:
         """把切换结果写回配置文件。"""
-        data = dict(self._raw)
-        data["active"] = label
-        self._raw = data
+        self._raw["active"] = label
         self.active_label = label
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self.path)
+        self.save()
+
+    def save(self) -> None:
+        """把内存中的 accounts / active 写回配置文件。"""
+        self._raw["accounts"] = self.accounts
+        self._raw["active"] = self.active_label
+        _write_json(self.path, self._raw)
+
+    def export_json(self) -> str:
+        """账户列表导出（不含任何服务端凭据，仅 uuid/clientId/备注）。"""
+        data = {
+            "format": "mtbridge-accounts",
+            "version": 1,
+            "exportedAt": int(time.time() * 1000),
+            "count": len(self.accounts),
+            "accounts": [
+                {
+                    "label": a.get("label", ""),
+                    "uuid": a.get("uuid", ""),
+                    "clientId": a.get("clientId", ""),
+                    "note": a.get("note", ""),
+                    "enabled": a.get("enabled", True),
+                    "quotaTotal": a.get("quotaTotal", 0),
+                    "quotaUsed": a.get("quotaUsed", 0),
+                }
+                for a in self.accounts
+            ],
+        }
+        return json.dumps(data, indent=2, ensure_ascii=False)
+
+    def import_json(self, raw: str, replace: bool = False) -> tuple[int, int]:
+        """导入账户，返回 (新增, 跳过)。按 uuid 去重。"""
+        root = json.loads(raw)
+        arr = root.get("accounts") if isinstance(root, dict) else root
+        if not isinstance(arr, list):
+            raise ValueError("找不到 accounts 数组")
+        if replace:
+            self.accounts = []
+        existing = {a.get("uuid") for a in self.accounts}
+        added = skipped = 0
+        for item in arr:
+            if not isinstance(item, dict):
+                continue
+            u = (item.get("uuid") or "").strip()
+            if len(u) < 16 or u in existing:
+                skipped += 1
+                continue
+            existing.add(u)
+            self.accounts.append({
+                "label": item.get("label") or f"账户 {u[:6]}",
+                "uuid": u,
+                "clientId": (item.get("clientId") or "").strip()
+                            or DEFAULT_CLIENT_ID,
+                "note": item.get("note", ""),
+                "enabled": item.get("enabled", True),
+            })
+            added += 1
+        self.save()
+        return added, skipped
+
+
+def _write_json(path: Path, data: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
 
 
 def load_config(path: Path) -> Config:
