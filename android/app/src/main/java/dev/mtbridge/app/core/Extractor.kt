@@ -112,9 +112,9 @@ class Extractor(
         val regions = heapRegions(pid)
         if (regions.isEmpty()) return ScanResult(emptyList(), pid, 0, "未定位到 Hermes 堆区段")
 
-        Bus.log("堆区段 ${regions.size} 个，开始转储…")
+        LogBus.event("扫描：定位堆区段", "${regions.size} 个可读区段 · pid $pid")
         val blob = fetchHeapBytes(pid, regions)
-        Bus.log("转储 ${blob.size / 1024 / 1024} MB，开始解析")
+        LogBus.event("扫描：转储完成", "${blob.size / 1024 / 1024} MB，开始解析 JWT")
 
         val seen = LinkedHashMap<String, Account>()
         // Hermes stores JS strings as UTF-16.
@@ -128,7 +128,7 @@ class Extractor(
             }
         }
 
-        Bus.log("解析到 ${seen.size} 个不同账户")
+        LogBus.event("扫描：解析完成", "命中 ${seen.size} 个不同账户", LogEntry.Level.SUCCESS)
         return ScanResult(
             accounts = seen.values.sortedByDescending { it.tokenExp },
             pid = pid,

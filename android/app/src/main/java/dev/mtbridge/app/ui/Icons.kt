@@ -98,3 +98,9 @@ val Terminal: ImageVector get() = icon(
 
 val Upload: ImageVector get() = icon(
     "Upload", "M9,16h6v-6h4l-7,-7 -7,7h4zM5,18h14v2H5z")
+
+val ExpandLess: ImageVector get() = icon(
+    "ExpandLess", "M12,8l-6,6 1.41,1.41L12,10.83l4.59,4.58L18,14z")
+
+val ExpandMore: ImageVector get() = icon(
+    "ExpandMore", "M12,16l-6,-6 1.41,-1.41L12,13.17l4.59,-4.58L18,10z")

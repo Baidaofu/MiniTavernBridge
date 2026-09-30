@@ -14,6 +14,8 @@ import dev.mtbridge.app.MainActivity
 import dev.mtbridge.app.MtApp
 import dev.mtbridge.app.R
 import dev.mtbridge.app.core.Bus
+import dev.mtbridge.app.core.LogBus
+import dev.mtbridge.app.core.LogEntry
 import dev.mtbridge.app.core.MiniTavernApi
 import dev.mtbridge.app.core.QuotaInfo
 
@@ -112,6 +114,7 @@ class ProxyService : Service() {
     }
 
     override fun onDestroy() {
+        LogBus.event("代理已停止", "端口 ${server?.boundPort ?: "-"}", LogEntry.Level.WARN)
         server?.stop()
         server = null
         super.onDestroy()

@@ -37,7 +37,7 @@ class AccountStore(private val ctx: Context) {
         }.getOrDefault(emptyList())
         _accounts.value = list
         _activeUuid.value = list.firstOrNull()?.uuid
-        Bus.log("已加载 ${list.size} 个账户")
+        LogBus.event("已加载账户", "${list.size} 个" + (list.firstOrNull()?.let { " · 活动 ${it.displayName}" } ?: ""))
     }
 
     private fun persist() {
@@ -62,7 +62,7 @@ class AccountStore(private val ctx: Context) {
             val tmp = File(ctx.filesDir, "accounts.json.tmp")
             tmp.writeText(arr.toString())
             tmp.renameTo(file)
-        }.onFailure { Bus.log("保存失败: ${it.message}") }
+        }.onFailure { LogBus.event("保存账户列表失败", it.message ?: "", LogEntry.Level.ERROR) }
     }
 
     private fun JSONObject.toAccount() = Account(
@@ -118,7 +118,7 @@ class AccountStore(private val ctx: Context) {
     fun setActive(uuid: String) {
         if (_accounts.value.any { it.uuid == uuid }) {
             _activeUuid.value = uuid
-            Bus.log("切换到账户 ${uuid.take(8)}")
+            LogBus.event("切换账户", _accounts.value.firstOrNull { it.uuid == uuid }?.displayName ?: uuid.take(8), LogEntry.Level.SUCCESS)
         }
     }
 

@@ -2,6 +2,8 @@ package dev.mtbridge.app.proxy
 
 import dev.mtbridge.app.core.Account
 import dev.mtbridge.app.core.Bus
+import dev.mtbridge.app.core.LogBus
+import dev.mtbridge.app.core.LogEntry
 import dev.mtbridge.app.core.MiniTavernApi
 import dev.mtbridge.app.core.QuotaInfo
 import org.json.JSONArray
@@ -253,6 +255,15 @@ class ProxyServer(
 
         MiniTavernApi.currentClientId = acc.clientId
 
+        // 记录本次调用的完整上下文，结束时写入结构化日志
+        val ctx = CallCtx(
+            model = full,
+            stream = wantStream,
+            account = acc,
+            requestBody = prettyJson(payload),
+        )
+        val t0 = System.nanoTime()
+
         var opened = MiniTavernApi.openChat(acc.uuid, acc.clientId, payload)
         if (wantStream && opened.isFailure) {
             // 上游可能不认 stream 标志：去掉标志重试，再由本地切成 SSE。
@@ -262,10 +273,10 @@ class ProxyServer(
             opened = MiniTavernApi.openChat(acc.uuid, acc.clientId, payload)
         }
         val up = opened.getOrElse { e ->
-            Bus.log("请求失败: ${e.message}")
+            val status = (e as? MiniTavernApi.UpstreamHttpError)?.code ?: 502
+            ctx.finish(t0, status, error = e.message ?: "upstream error")
             // 上游给了明确状态码（配额不足=400、认证失败=401…）就原样透出，
             // 否则才归为 502。
-            val status = (e as? MiniTavernApi.UpstreamHttpError)?.code ?: 502
             return json(out, status, JSONObject().put("error",
                 JSONObject().put("message", e.message ?: "upstream error")))
         }
@@ -274,19 +285,51 @@ class ProxyServer(
             when {
                 // 1) 上游真流式：逐行透传
                 wantStream && up.isEventStream ->
-                    relaySse(out, acc, up, requested)
+                    relaySse(out, acc, up, requested, ctx, t0)
                 // 2) 上游只给整包 JSON：本地切成 SSE
                 wantStream ->
-                    syntheticSse(out, acc, up, requested)
+                    syntheticSse(out, acc, up, requested, ctx, t0)
                 // 3) 客户端要 JSON、上游给 SSE：累积成一次完整响应
                 up.isEventStream ->
-                    accumulatedJson(out, acc, up, requested)
+                    accumulatedJson(out, acc, up, requested, ctx, t0)
                 // 4) 普通非流式
                 else ->
-                    plainJson(out, acc, up)
+                    plainJson(out, acc, up, ctx, t0)
             }
         }
     }
+
+    /** 一次调用从发起到结束的上下文，用于产出结构化日志。 */
+    private class CallCtx(
+        val model: String,
+        val stream: Boolean,
+        val account: Account,
+        val requestBody: String,
+    ) {
+        private val response = StringBuilder()
+        fun append(s: String) {
+            if (response.length < LogBus.MAX_TEXT) response.append(s)
+        }
+
+        @Synchronized
+        fun finish(t0: Long, status: Int?, error: String? = null) {
+            LogBus.call(
+                model = model,
+                stream = stream,
+                accountLabel = account.displayName,
+                accountUuid = account.uuid,
+                latencyMs = (System.nanoTime() - t0) / 1_000_000,
+                status = status,
+                requestBody = requestBody,
+                responseBody = response.toString().ifBlank { "(空)" },
+                error = error,
+            )
+        }
+    }
+
+    private fun prettyJson(o: JSONObject): String = runCatching {
+        o.toString(2)
+    }.getOrElse { o.toString() }
 
     // ---------------------------------------------------------------- replies
 
@@ -294,9 +337,14 @@ class ProxyServer(
         out: java.io.OutputStream,
         acc: Account,
         up: MiniTavernApi.ChatUpstream,
+        ctx: CallCtx,
+        t0: Long,
     ) {
         val text = up.body.bufferedReader(Charsets.UTF_8).use { it.readText() }
         reportQuota(acc, MiniTavernApi.quotaOf(text))
+        ctx.append(text)
+        ctx.append(text)
+        ctx.finish(t0, 200)
         respond(out, 200, text, "application/json; charset=utf-8")
     }
 
@@ -306,6 +354,8 @@ class ProxyServer(
         acc: Account,
         up: MiniTavernApi.ChatUpstream,
         model: String,
+        ctx: CallCtx,
+        t0: Long,
     ) {
         writeSseHead(out)
         val chunked = Chunked(out)
@@ -339,6 +389,7 @@ class ProxyServer(
         }
         chunked.finish()
         reportQuota(acc, quota)
+        ctx.finish(t0, 200)
     }
 
     /**
@@ -351,9 +402,12 @@ class ProxyServer(
         acc: Account,
         up: MiniTavernApi.ChatUpstream,
         model: String,
+        ctx: CallCtx,
+        t0: Long,
     ) {
         val text = up.body.bufferedReader(Charsets.UTF_8).use { it.readText() }
         reportQuota(acc, MiniTavernApi.quotaOf(text))
+        ctx.append(text)
 
         writeSseHead(out)
         val chunked = Chunked(out)
@@ -447,11 +501,15 @@ class ProxyServer(
         acc: Account,
         up: MiniTavernApi.ChatUpstream,
         model: String,
+        ctx: CallCtx,
+        t0: Long,
     ) {
         val raw = up.body.bufferedReader(Charsets.UTF_8).use { it.readText() }
         if (!raw.contains("data:")) {
             // 声称是 SSE 却不是 → 当普通 JSON 交出去
             reportQuota(acc, MiniTavernApi.quotaOf(raw))
+            ctx.append(raw)
+            ctx.finish(t0, 200)
             return respond(out, 200, raw, "application/json; charset=utf-8")
         }
 
@@ -516,6 +574,8 @@ class ProxyServer(
             )
         }
         reportQuota(acc, quota)
+        ctx.append(response.toString())
+        ctx.finish(t0, 200)
         respond(out, 200, response.toString(), "application/json; charset=utf-8")
     }
 

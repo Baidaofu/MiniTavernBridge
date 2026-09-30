@@ -30,6 +30,8 @@ import androidx.compose.ui.Modifier
 import androidx.core.view.WindowCompat
 import dev.mtbridge.app.core.Account
 import dev.mtbridge.app.core.Bus
+import dev.mtbridge.app.core.LogBus
+import dev.mtbridge.app.core.LogEntry
 import dev.mtbridge.app.core.Constants
 import dev.mtbridge.app.core.Extractor
 import dev.mtbridge.app.core.MiniTavernApi
@@ -77,7 +79,7 @@ class MainActivity : ComponentActivity() {
             contentResolver.openOutputStream(uri)?.use {
                 it.write(app.store.exportJson().toByteArray())
             }
-        }.onSuccess { Bus.log("已导出到 $uri") }
+        }.onSuccess { LogBus.event("导出账户列表", "已写入 $uri", LogEntry.Level.SUCCESS) }
     }
 
     private fun readImport(uri: Uri) {
@@ -85,8 +87,8 @@ class MainActivity : ComponentActivity() {
             val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
                 ?: return
             val (added, skipped) = app.store.importJson(text, replace = false)
-            Bus.log("导入完成：新增 $added，跳过重复 $skipped")
-        }.onFailure { Bus.log("导入失败: ${it.message}") }
+            LogBus.event("导入账户列表", "新增 $added，跳过重复 $skipped", LogEntry.Level.SUCCESS)
+        }.onFailure { LogBus.event("导入失败", it.message ?: "", LogEntry.Level.ERROR) }
     }
 
     @Composable
@@ -107,16 +109,15 @@ class MainActivity : ComponentActivity() {
         val accounts by app.store.accounts.collectAsState()
         val activeUuid by app.store.activeUuid.collectAsState()
         val account = accounts.firstOrNull { it.uuid == activeUuid }
-        val logs = remember { mutableStateListOf<String>().apply { addAll(Bus.logs.map { it.second }) } }
+        val logs by LogBus.entries.collectAsState()
 
         LaunchedEffect(Unit) {
             rootOk = withContext(Dispatchers.IO) { RootShell.requestAndCheck() }
-            // poll the log bus
-            while (true) {
-                kotlinx.coroutines.delay(1200)
-                logs.clear()
-                logs.addAll(Bus.logs.takeLast(200).map { fmtLog(it) })
-            }
+            LogBus.event(
+                "应用启动",
+                "root ${if (rootOk) "已获取" else "未获取"} · 账户 ${app.store.accounts.value.size} 个",
+                LogEntry.Level.SUCCESS,
+            )
         }
 
         // reload models whenever the active account changes
