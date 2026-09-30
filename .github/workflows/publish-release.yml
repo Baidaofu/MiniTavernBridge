@@ -78,14 +78,15 @@ jobs:
         id: ver
         run: |
           set -euo pipefail
-          cd dist/apk
-          test -f app-release.apk || { echo "::error::产物里没有 app-release.apk"; exit 1; }
-          test -f VERSION         || { echo "::error::产物里没有 VERSION 文件"; exit 1; }
-          VERSION="$(tr -d '[:space:]' < VERSION)"
+          test -f dist/apk/app-release.apk || { echo "::error::产物里没有 app-release.apk"; exit 1; }
+          test -f dist/apk/VERSION           || { echo "::error::产物里没有 VERSION 文件"; exit 1; }
+          VERSION="$(tr -d '[:space:]' < dist/apk/VERSION)"
           [ -n "$VERSION" ] || { echo "::error::VERSION 为空"; exit 1; }
           echo "  产物版本: $VERSION"
-          mv app-release.apk "mtbridge-$VERSION.apk"
-          rm -f VERSION
+          # 移到 dist/ 根：后续 Publish 步骤会 cd dist 再用相对路径引用，
+          # Summary 也从仓库根 ls dist/mtbridge-*.apk，两处都依赖它在这里。
+          mv dist/apk/app-release.apk "dist/mtbridge-$VERSION.apk"
+          rm -f dist/apk/VERSION
           echo "name=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Package Windows scripts
@@ -120,10 +121,14 @@ jobs:
           # runner 默认可能是 C，必须显式指定
           export LC_ALL=C.UTF-8
 
-          # 上一个 tag：排除本次要发的那个（重发同版本时以更早的为准）
+          # 上一个 tag：按时间取最近的，并排除本次要发的那个。
+          # 仓库里只有 v1.0.0 而又是在重发 1.0.0 时，排除后会得到空，
+          # 此时回退到「该版本自身的 tag」也没意义（范围会为空），
+          # 因此额外保留一个判断：没有其它 tag 就当作首个版本。
           PREV=$(git tag --list 'v*' --sort=-creatordate \
                  | grep -vx "v${VERSION}" | head -1 || true)
           RANGE="${PREV:+$PREV..}$SHA"
+          echo "  产物版本: $VERSION"
           echo "  更新日志范围: $RANGE"
 
           {
@@ -133,7 +138,11 @@ jobs:
             echo "## 更新日志"
             echo
             if [ -z "$PREV" ]; then
-              echo "首个版本，无历史提交可比对。"
+              if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+                echo "重发 \`v${VERSION}\`：除本次修复外无其它版本可对比。"
+              else
+                echo "首个版本，无历史提交可比对。"
+              fi
             else
               echo "自 \`$PREV\` 起："
               echo
@@ -227,7 +236,8 @@ jobs:
             echo
             echo "### 附件"
             echo '```'
-            ls -lh dist/mtbridge-*.apk dist/mtbridge-windows.zip | awk '{print $5, $9}'
+            ls -lh dist/mtbridge-*.apk dist/mtbridge-windows.zip 2>/dev/null \
+              | awk '{print $5, $9}' || echo "  (未找到产物)"
             echo '```'
             echo
             echo "### 说明预览"
