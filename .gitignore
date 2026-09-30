@@ -23,6 +23,11 @@ captures/
 local.properties
 
 # ---------- Windows ----------
+# TUI 运行期生成的快照，含活动账户 uuid（等同密码），绝不提交
+st.json
+mm.json
+accounts_export.json
+*.bak
 __pycache__/
 *.pyc
 mtbridge.log
