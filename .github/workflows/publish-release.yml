@@ -1,0 +1,144 @@
+name: Publish Release
+
+# 只能手动触发。发布动作需要人确认，避免「推个代码就把包发出去了」。
+#
+# 流程：Build APK 跑出产物 → 在 Actions 页面确认没问题 → 手动触发本工作流，
+# 指定那次 run 的 id，本工作流会**原样取用那个已测过的 APK** 发到 Release，
+# 不会重新构建。发布���的版本号取自产物里的 VERSION 文件（构建时写入），
+# 因此和 APK 实际版本一定一致。
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Build APK 的 run id（留空 = 取最近一次成功的）'
+        required: false
+        type: string
+      tag:
+        description: 'Release tag（留空 = v<产物版本号>）'
+        required: false
+        type: string
+      dry_run:
+        description: '演练：只检查并打印，不实际创建 Release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write   # 创建/更新 Release
+  actions: read     # 读取别的 run 的产物
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve build run
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_RUN: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_RUN" ]; then
+            RUN_ID="$INPUT_RUN"
+            echo "使用指定的 run: $RUN_ID"
+          else
+            RUN_ID=$(gh run list --workflow build-apk.yml --status success \
+                      --limit 1 --json databaseId --jq '.[0].databaseId')
+            [ -n "$RUN_ID" ] || { echo "::error::没有成功的 Build APK 运行"; exit 1; }
+            echo "自动选中最近一次成功的 run: $RUN_ID"
+          fi
+          gh run view "$RUN_ID" --json headSha,displayTitle,conclusion \
+            --jq '"  提交 \(.headSha[0:7])  \(.displayTitle)  [\(.conclusion)]"'
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      # 关键：取用构建时的那个 APK，本工作流不碰编译
+      - name: Download APK from that run
+        uses: actions/download-artifact@v4
+        with:
+          name: minitavern-bridge-release
+          path: dist/apk
+          run-id: ${{ steps.pick.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read version and rename asset
+        id: ver
+        run: |
+          set -euo pipefail
+          cd dist/apk
+          test -f app-release.apk || { echo "::error::产物里没有 app-release.apk"; exit 1; }
+          test -f VERSION         || { echo "::error::产物里没有 VERSION 文件"; exit 1; }
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          [ -n "$VERSION" ] || { echo "::error::VERSION 为空"; exit 1; }
+          echo "  产物版本: $VERSION"
+          mv app-release.apk "mtbridge-$VERSION.apk"
+          rm -f VERSION
+          echo "name=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Package Windows scripts
+        run: |
+          set -euo pipefail
+          mkdir -p dist/mtbridge
+          cp windows/mtbridge.py windows/mtbridge_tui.py \
+             windows/config.example.json windows/README.md windows/TUI.md dist/mtbridge/
+          (cd dist && zip -qr mtbridge-windows.zip mtbridge)
+          echo "  Windows 包: $(ls -lh dist/mtbridge-windows.zip | awk '{print $5}')"
+
+      # 说明正文存在版本库（方便评审与复用），仅把版本号占位符替换掉
+      - name: Render release notes
+        env:
+          VERSION: ${{ steps.ver.outputs.name }}
+        run: |
+          set -euo pipefail
+          sed 's/{{VERSION}}/'"$VERSION"'/g' .github/release-notes.md > dist/notes.md
+          echo "  说明 $(wc -c < dist/notes.md) 字节"
+          grep -q "{{VERSION}}" dist/notes.md && { echo "::error::仍有未替换的占位符"; exit 1; } || true
+
+      - name: Publish
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || format('v{0}', steps.ver.outputs.name) }}
+          VERSION: ${{ steps.ver.outputs.name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，覆盖附件与说明"
+            gh release upload "$TAG" "mtbridge-$VERSION.apk" mtbridge-windows.zip --clobber
+            gh release edit "$TAG" --title "MiniTavern Bridge $VERSION" --notes-file notes.md
+          else
+            gh release create "$TAG" \
+              --title "MiniTavern Bridge $VERSION" \
+              --notes-file notes.md \
+              "mtbridge-$VERSION.apk" mtbridge-windows.zip
+          fi
+          echo "发布完成：$TAG"
+
+      - name: Summary (dry run)
+        if: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo "## 演练模式，未实际发布"
+            echo
+            echo "- 来源 run: \`${{ steps.pick.outputs.run_id }}\`"
+            echo "- 产物版本: \`${{ steps.ver.outputs.name }}\`"
+            echo "- 将要创建的 tag: \`${{ inputs.tag || format('v{0}', steps.ver.outputs.name) }}\`"
+            echo
+            echo "### 附件"
+            echo '```'
+            ls -lh dist/mtbridge-*.apk dist/mtbridge-windows.zip | awk '{print $5, $9}'
+            echo '```'
+            echo
+            echo "### 说明预览"
+            echo '```'
+            cat dist/notes.md
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

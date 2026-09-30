@@ -1,5 +1,7 @@
 # MiniTavern Bridge
 
+**当前版本 v{{VERSION}}**
+
 把 MiniTavern 会员代理包装成 **OpenAI 兼容端点**，让 pi、Kelivo、SillyTavern
 等任意客户端直接使用。
 
@@ -12,7 +14,7 @@
 
 | 文件 | 平台 | 说明 |
 |---|---|---|
-| `mtbridge-release.apk` | Android | 已用项目签名密钥签名的正式包 |
+| `mtbridge-{{VERSION}}.apk` | Android | 已用项目签名密钥签名的正式包 |
 | `mtbridge-windows.zip` | Windows / macOS / Linux | 纯 Python，零第三方依赖 |
 
 ---
@@ -21,7 +23,7 @@
 
 **要求**：root、已安装并登录 MiniTavern。
 
-1. 安装 `mtbridge-release.apk`
+1. 安装 `mtbridge-{{VERSION}}.apk`
 2. 打开 App，进 **账户** 页 → 点「扫描设备」
    （App 会从 MiniTavern 进程内存里提取会话凭据；也可手动填 uuid）
 3. 回到**首页** → 点「启动代理」
