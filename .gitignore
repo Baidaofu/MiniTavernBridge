@@ -43,3 +43,6 @@ desktop.ini
 *.jks
 KEYSTORE_INFO.md
 keystore/
+
+# 构建产物目录
+dist/

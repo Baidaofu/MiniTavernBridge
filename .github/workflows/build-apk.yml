@@ -81,6 +81,9 @@ jobs:
     # 签名密钥只在本仓库自身的 main 推送时使用。
     # pull_request（含 fork）一律跳过，避免密钥被不受信任的代码接触。
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # 发布 Release 需要写权限；构建本身仍只需读。
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: android
@@ -154,3 +157,45 @@ jobs:
           name: minitavern-bridge-release
           path: android/app/build/outputs/apk/release/app-release.apk
           retention-days: 90
+
+      # ---- 发布 GitHub Release -------------------------------------------
+      # 版本号以 build.gradle.kts 的 versionName 为准，避免两处不同步。
+      - name: Resolve version
+        id: ver
+        run: echo "name=$(grep -oP 'versionName\s*=\s*\"\K[^\"]+' app/build.gradle.kts | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Package Windows scripts
+        run: |
+          set -euo pipefail
+          cd ..
+          mkdir -p dist/mtbridge
+          cp windows/mtbridge.py windows/mtbridge_tui.py \
+             windows/config.example.json windows/README.md windows/TUI.md dist/mtbridge/
+          cd dist && zip -qr mtbridge-windows.zip mtbridge
+          echo "打包完成：$(ls -lh mtbridge-windows.zip | awk '{print $5}')"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.ver.outputs.name }}
+          APKSIGNER_PATH: ${{ github.workspace }}/android/app/build/outputs/apk/release/app-release.apk
+        run: |
+          set -euo pipefail
+          cd ..          # 本 job 默认 working-directory 是 android/，回到仓库根
+          APKSIGNER="$(find "${ANDROID_HOME:-$HOME/Android/Sdk}/build-tools" -name apksigner -type f | sort | tail -1)"
+          # 附件名固定，避免出现 app-release-1.apk 这种带流水号的重复资产
+          cp "$APKSIGNER_PATH" "dist/mtbridge-${{ steps.ver.outputs.name }}.apk"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，覆盖附件"
+            gh release upload "$TAG" \
+              "dist/mtbridge-${{ steps.ver.outputs.name }}.apk" \
+              "dist/mtbridge-windows.zip" --clobber
+          else
+            gh release create "$TAG" \
+              --title "MiniTavern Bridge ${{ steps.ver.outputs.name }}" \
+              --notes-file .github/release-notes.md \
+              "dist/mtbridge-${{ steps.ver.outputs.name }}.apk" \
+              "dist/mtbridge-windows.zip"
+          fi
+          echo "发布完成：$TAG"
