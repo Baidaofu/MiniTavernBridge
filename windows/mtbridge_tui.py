@@ -293,6 +293,8 @@ def run_tui(cfg_path: Path, port: int) -> int:
 
     sel = 0
     last = 0.0
+    t_taps = 0          # 调试入口：连按 5 次 t 才现身，对应安卓版连点标题 5 次
+    last_tap = 0.0
     with Term() as t:
         while True:
             now = time.time()
@@ -332,6 +334,29 @@ def run_tui(cfg_path: Path, port: int) -> int:
                     err, models = STATE.upstream.models(acc["clientId"])
                     state["model_count"] = len(models)
                     state["msg"] = f"模型 {len(models)}" if models else f"失败：{err}"
+            elif k == "t":
+                # 连按 5 次解锁调试入口；超过 3 秒算重新开始
+                now = time.time()
+                t_taps = t_taps + 1 if now - last_tap < 3.0 else 1
+                last_tap = now
+                if t_taps >= 5:
+                    t_taps = 0
+                    state["msg"] = "正在开户…"
+                    t.write("  正在开户…\n")
+                    try:
+                        acc = mtbridge.add_test_account(cfg)
+                    except Exception as e:  # noqa: BLE001
+                        state["msg"] = f"开户失败：{e}"
+                    else:
+                        sel = len(cfg.accounts) - 1
+                        q = (f"{acc['quotaUsed']}/{acc['quotaTotal']}"
+                             if acc["quotaTotal"] else "?")
+                        state["msg"] = f"已创建 {acc['label']} 配额 {q}"
+                elif t_taps >= 3:
+                    state["msg"] = f"再按 {5 - t_taps} 次 t 解锁调试入口"
+            else:
+                if t_taps:
+                    t_taps = 0
 
     httpd.shutdown()
     return 0

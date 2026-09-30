@@ -29,8 +29,10 @@ MiniTavern 后端有三个特性让通用客户端接不上：
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import secrets
 import socket
 import ssl
 import sys
@@ -46,6 +48,9 @@ __version__ = "1.0.0"
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "config.json"
+
+# 从 App 派生的常量，所有安装上相同；后端缺失该头会返回「用户不存在」
+DEFAULT_CLIENT_ID = "68cd199d61947054fdf25ebe"
 
 # 实测在所有设备、所有安装上完全相同，是 App 派生的常量
 DEFAULT_CLIENT_ID = "68cd199d61947054fdf25ebe"
@@ -354,6 +359,86 @@ def parse_quota(text: str) -> dict | None:
 def split_pieces(text: str, size: int = 64) -> list[str]:
     """切片。Python 的 str 按码点索引，不会切开代理对。"""
     return [text[i:i + size] for i in range(0, len(text), size)] or []
+
+
+# ------------------------------------------------------ 调试账户（默认隐藏）
+
+def provision_test_account(cfg: Config) -> dict:
+    """凭空造一个可用的测试账户并返回它的配置项。
+
+    `POST /api/auth/app/bootstrap` 就是 MiniTavern 首次安装时的自注册入口，
+    对任意 uuid 都会开户并签发 accessToken，随后按账户发放免费配额。
+    实测随机 uuid 不调这一步、直接 chat 也会被自动开户，所以 bootstrap
+    失败会退化成"只造 uuid"。
+
+    用途：手边没有多余真机账户时验证链路（配额、模型、多账户切换、
+    配额耗尽后的错误路径）。
+
+    ⚠️ 这是服务端真实开户动作。单个用于本地调试没问题，批量生成属于滥用，
+    请勿大量使用。
+    """
+    up = Upstream(cfg)
+    uuid = secrets.token_hex(32)
+
+    token = ""
+    try:
+        url = f"{cfg.base_url}/api/auth/app/bootstrap"
+        req = urllib.request.Request(url, data=json.dumps({"uuid": uuid}).encode())
+        req.add_header("X-Client-Id", DEFAULT_CLIENT_ID)
+        req.add_header("Content-Type", "application/json")
+        ctx = up._ssl_ctx() if url.startswith("https") else None
+        with urllib.request.urlopen(req, timeout=cfg.request_timeout,
+                                    context=ctx) as resp:
+            blob = json.loads(resp.read().decode("utf-8", "replace"))
+        token = (blob.get("data") or {}).get("accessToken") or ""
+    except Exception as e:  # noqa: BLE001
+        log(f"bootstrap 未成功（继续，直接用新 uuid）: {e}", level="WARN")
+
+    sub = ""
+    if token:
+        try:
+            part = token.split(".")[1]
+            sub = json.loads(base64.urlsafe_b64decode(
+                part + "=" * (-len(part) % 4)))["sub"]
+        except Exception:  # noqa: BLE001
+            sub = ""
+
+    # 探一次配额：既验证新账户真能调通，也把初始配额读回来
+    quota = None
+    try:
+        _, models = up.models(DEFAULT_CLIENT_ID)
+        if models:
+            code, text = up._open(cfg.chat_url, "POST", json.dumps({
+                "uuid": uuid, "model": models[0]["name"],
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}],
+            }), DEFAULT_CLIENT_ID)
+            if code == 200:
+                quota = parse_quota(text)
+    except Exception as e:  # noqa: BLE001
+        log(f"配额探测失败: {e}", level="WARN")
+
+    return {
+        "label": f"调试 {uuid[:6]}",
+        "uuid": uuid,
+        "clientId": DEFAULT_CLIENT_ID,
+        "sub": sub,
+        "token": token,
+        "tokenExp": 0,
+        "enabled": True,
+        "quotaTotal": (quota or {}).get("total", 0),
+        "quotaUsed": (quota or {}).get("used", 0),
+    }
+
+
+def add_test_account(cfg: Config) -> dict:
+    """造一个测试账户、写进配置并设为活动账户。返回该账户。"""
+    acc = provision_test_account(cfg)
+    cfg.accounts = [a for a in cfg.accounts if a.get("uuid") != acc["uuid"]]
+    cfg.accounts.append(acc)
+    cfg.active_label = acc["label"]
+    cfg.save()
+    return acc
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -804,6 +889,9 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="只检查配置与网络后退出")
     ap.add_argument("--test", action="store_true", help="启动服务并执行端点自检")
     ap.add_argument("--active", metavar="LABEL", help="切换活动账户并写回配置")
+    # 调试入口：默认不出现在 --help 里，用 help=argparse.SUPPRESS 隐藏
+    ap.add_argument("--test-account", action="store_true",
+                    help=argparse.SUPPRESS)
     ap.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
     ap.add_argument("--version", action="version", version=f"mtbridge {__version__}")
     args = ap.parse_args()
@@ -817,6 +905,13 @@ def main() -> int:
                 + ", ".join(a.get("label", "?") for a in cfg.accounts))
         cfg.save_active(args.active)
         print(f"活动账户已切换为 {args.active}（已写入 {cfg.path}）")
+        return 0
+
+    if args.test_account:
+        acc = add_test_account(cfg)
+        q = f"{acc['quotaUsed']}/{acc['quotaTotal']}" if acc["quotaTotal"] else "未知"
+        print(f"已创建调试账户 {acc['label']}（uuid {acc['uuid'][:12]}…，配额 {q}）")
+        print(f"已写入 {cfg.path} 并设为活动账户")
         return 0
 
     if args.check:
