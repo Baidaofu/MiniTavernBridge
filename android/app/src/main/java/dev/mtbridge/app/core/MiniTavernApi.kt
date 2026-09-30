@@ -21,12 +21,17 @@ object MiniTavernApi {
 
     data class RemoteModel(val id: String, val name: String, val description: String)
 
-    private fun open(path: String, method: String, body: String?): Pair<Int, String> {
+    private fun open(
+        path: String,
+        method: String,
+        body: String?,
+        clientId: String = currentClientId,
+    ): Pair<Int, String> {
         val conn = URL(Constants.UPSTREAM + path).openConnection() as HttpURLConnection
         conn.requestMethod = method
         conn.connectTimeout = 15_000
         conn.readTimeout = 300_000
-        conn.setRequestProperty("X-Client-Id", currentClientId)
+        conn.setRequestProperty("X-Client-Id", clientId)
         conn.setRequestProperty("Content-Type", "application/json")
         if (body != null) {
             conn.doOutput = true
@@ -141,6 +146,21 @@ object MiniTavernApi {
             internalModel = oi.optString("model", ""),
         )
     }.getOrNull()
+
+    /**
+     * `POST /api/auth/app/bootstrap` —— MiniTavern 首次安装走的自注册入口。
+     * 对任意 uuid 都会开户并签发 accessToken，随后按账户发放免费配额。
+     * 返回 accessToken；失败时返回失败（但新 uuid 仍可直接用于 chat）。
+     */
+    fun bootstrap(clientId: String, uuid: String): Result<String?> = runCatching {
+        val (code, text) = open(
+            "/api/auth/app/bootstrap", "POST",
+            JSONObject().put("uuid", uuid).toString(), clientId,
+        )
+        if (code !in 200..299) error("HTTP $code: ${text.take(200)}")
+        JSONObject(text).optJSONObject("data")
+            ?.optString("accessToken")?.ifBlank { null }
+    }
 
     /** Cheap round trip used to refresh a cached quota reading. */
     fun probeQuota(uuid: String, clientId: String, model: String): Result<QuotaInfo> = runCatching {

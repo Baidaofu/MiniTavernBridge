@@ -31,10 +31,12 @@ import androidx.compose.ui.Modifier
 import androidx.core.view.WindowCompat
 import dev.mtbridge.app.core.Account
 import dev.mtbridge.app.core.Bus
+import dev.mtbridge.app.core.Constants
 import dev.mtbridge.app.core.Extractor
 import dev.mtbridge.app.core.MiniTavernApi
 import dev.mtbridge.app.core.QuotaInfo
 import dev.mtbridge.app.core.RootShell
+import dev.mtbridge.app.core.TestAccount
 import dev.mtbridge.app.proxy.ProxyService
 import dev.mtbridge.app.ui.AccountsScreen
 import dev.mtbridge.app.ui.HomeScreen
@@ -100,6 +102,8 @@ class MainActivity : ComponentActivity() {
         var models by remember { mutableStateOf<List<MiniTavernApi.RemoteModel>>(emptyList()) }
         var modelError by remember { mutableStateOf<String?>(null) }
         var editing by remember { mutableStateOf<Account?>(null) }
+        // 调试入口需在账户页连点标题 5 次解锁；上抛到这里以跨页签保持
+        var debugUnlocked by remember { mutableStateOf(false) }
 
         val accounts by app.store.accounts.collectAsState()
         val activeUuid by app.store.activeUuid.collectAsState()
@@ -221,6 +225,25 @@ class MainActivity : ComponentActivity() {
                         },
                         onImport = onImport,
                         onExport = onExport,
+                        debugUnlocked = debugUnlocked,
+                        onDebugUnlocked = { debugUnlocked = true },
+                        onNewTestAccount = {
+                            scope.launch {
+                                snackbar.showSnackbar("正在开户…")
+                                val r = withContext(Dispatchers.IO) {
+                                    TestAccount.provision(Constants.CLIENT_ID_FALLBACK)
+                                }
+                                r.onSuccess { acc ->
+                                    app.store.upsert(acc)
+                                    app.store.setActive(acc.uuid)
+                                    snackbar.showSnackbar(
+                                        "已创建 ${acc.shortUuid}，配额 ${acc.quotaUsed}/${acc.quotaTotal}"
+                                    )
+                                }.onFailure {
+                                    snackbar.showSnackbar("开户失败: ${it.message}")
+                                }
+                            }
+                        },
                         snackbar = snackbar,
                     )
 
