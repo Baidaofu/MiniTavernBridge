@@ -362,11 +362,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         data = [
             {
-                "id": m["id"],
+                # id 用后端真实全名，第三方软件直接看到可读模型名；
+                # 短 id 仍可用于发请求，额外挂在 mtb_id 上。
+                "id": m["name"],
                 "object": "model",
                 "created": 1788400000,
                 "owned_by": "minitavern",
                 "name": m["name"],
+                "mtb_id": m["id"],
                 "description": m["description"],
             }
             for m in models
@@ -384,9 +387,9 @@ class Handler(BaseHTTPRequestHandler):
         if hit is None:
             self._err(404, f"没有这个模型：{mid}")
             return
-        self._json(200, {"id": hit["id"], "object": "model", "created": 1788400000,
+        self._json(200, {"id": hit["name"], "object": "model", "created": 1788400000,
                          "owned_by": "minitavern", "name": hit["name"],
-                         "description": hit["description"]})
+                         "mtb_id": hit["id"], "description": hit["description"]})
 
     def _status(self):
         cfg = STATE.cfg

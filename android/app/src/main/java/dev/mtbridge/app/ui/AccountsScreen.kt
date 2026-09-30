@@ -1,5 +1,6 @@
 package dev.mtbridge.app.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -15,9 +16,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Upload
@@ -40,12 +42,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import dev.mtbridge.app.core.Account
+import kotlinx.coroutines.launch
+
+private const val UNLOCK_TAPS = 5
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,13 +64,38 @@ fun AccountsScreen(
     onAddManual: (String, String) -> Unit,
     onImport: () -> Unit,
     onExport: () -> Unit,
+    debugUnlocked: Boolean,
+    onDebugUnlocked: () -> Unit,
+    onNewTestAccount: () -> Unit,
     snackbar: SnackbarHostState,
 ) {
     var pendingDelete by remember { mutableStateOf<Account?>(null) }
     var showAdd by remember { mutableStateOf(false) }
+    // 调试入口默认隐藏：连点标题 5 次才现身。
+    // 解锁状态上抛到调用方，切页签不会重新隐藏。
+    var titleTaps by remember { mutableStateOf(0) }
+    val scope = rememberCoroutineScope()
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("账户 (${accounts.size})") }) },
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        "账户 (${accounts.size})",
+                        modifier = Modifier
+                            .clickable {
+                                titleTaps++
+                                if (titleTaps >= UNLOCK_TAPS) {
+                                    titleTaps = 0
+                                    onDebugUnlocked()
+                                    scope.launch { snackbar.showSnackbar("调试功能已解锁") }
+                                }
+                            }
+                            .padding(vertical = 10.dp),
+                    )
+                },
+            )
+        },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { pad ->
         LazyColumn(
@@ -90,7 +121,8 @@ fun AccountsScreen(
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(horizontal = 4.dp),
                     ) {
-                        Icon(Icons.Default.Upload, null, Modifier.size(18.dp))
+                        // 数据流入应用 = 下载箭头
+                        Icon(Icons.Default.Download, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("导入", maxLines = 1, softWrap = false)
                     }
@@ -99,9 +131,36 @@ fun AccountsScreen(
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(horizontal = 4.dp),
                     ) {
-                        Icon(Icons.Default.FileDownload, null, Modifier.size(18.dp))
+                        // 数据流出应用 = 上传箭头
+                        Icon(Icons.Default.Upload, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("导出", maxLines = 1, softWrap = false)
+                    }
+                }
+            }
+
+            if (debugUnlocked) {
+                item {
+                    // 调试入口：后端对新 uuid 会自动开户并发放免费配额，
+                    // 手边没有多余真机账户时用它验证链路。仅本地调试用。
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedButton(
+                            onClick = onNewTestAccount,
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) {
+                            Icon(Icons.Default.BugReport, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("调试账户", maxLines = 1, softWrap = false)
+                        }
+                        Text(
+                            "后端会给新 uuid 自动开户并发放免费配额",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }

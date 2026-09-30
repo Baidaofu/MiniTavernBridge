@@ -184,11 +184,15 @@ class ProxyServer(
         val arr = JSONArray()
         models.forEach { m ->
             arr.put(JSONObject()
-                .put("id", m.id)
+                // id 用后端真实全名（如 deepseek/deepseek-v3.2-exp），
+                // 第三方软件直接看到可读模型名；短 id 仍可用于发请求
+                // （serveChat 双向匹配），额外挂在 mtb_id 上方便排查。
+                .put("id", m.name)
                 .put("object", "model")
                 .put("created", 1788400000L)
                 .put("owned_by", "minitavern")
                 .put("name", m.name)
+                .put("mtb_id", m.id)
                 .put("description", m.description))
         }
         json(out, 200, JSONObject().put("object", "list").put("data", arr))
@@ -202,9 +206,10 @@ class ProxyServer(
         val hit = models.firstOrNull { it.id == mid || it.name == mid }
         if (hit == null) return json(out, 404, JSONObject()
             .put("error", JSONObject().put("message", "no such model")))
-        json(out, 200, JSONObject().put("id", hit.id).put("object", "model")
+        json(out, 200, JSONObject().put("id", hit.name).put("object", "model")
             .put("created", 1788400000L).put("owned_by", "minitavern")
-            .put("name", hit.name).put("description", hit.description))
+            .put("name", hit.name).put("mtb_id", hit.id)
+            .put("description", hit.description))
     }
 
     /** Local-only helper so other tooling can read the active account state. */
