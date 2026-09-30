@@ -8,12 +8,12 @@
 | | [安卓版](android/) | [Windows 版](windows/) |
 |---|---|---|
 | 语言 | Kotlin / Jetpack Compose | Python（零第三方依赖） |
-| 界面 | Material 3 | 命令行 |
+| 界面 | Material 3（MD3 Expressive 形状） | 终端 TUI / 命令行 |
 | 账户提取 | ✅ root 转储进程内存 | — （手动填 uuid） |
 | 本地代理 | ✅ 前台服务 | ✅ |
 | 流式 SSE | ✅ 透传 / 本地合成 | ✅ 透传 / 本地合成 |
-| 多账户 | ✅ UI 切换 | ✅ `--active` 切换 |
-| 导入导出 | ✅ | — |
+| 多账户 | ✅ UI 切换 | ✅ TUI 切换 / `--active` |
+| 导入导出 | ✅ | ✅ |
 
 ---
 
@@ -64,7 +64,22 @@ cd android
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-需要 root。启动后点「扫描设备」→「启动代理」。
+需要 root。启动后在**账户页**点「扫描设备」提取账户（已从首页移过来），
+再到首页点「启动代理」。配额检测在首页的配额卡片里，刷新即发一个
+`max_tokens:1` 的极小请求读后端返回的 `otherInfo`（后端没有可用的
+配额查询接口，`/api/users/getAdQuota` 是死的）。
+
+<details>
+<summary>在 arm64 / Termux 上构建？</summary>
+
+Gradle 默认从 Maven 拉的 `aapt2` 是 x86_64 二进制，arm64 上会报
+`Failed to start AAPT2 process`。改用系统自带的 aapt2 即可：
+
+```properties
+# ~/.gradle/gradle.properties
+android.aapt2FromMavenOverride=/data/data/com.termux/files/usr/bin/aapt2
+```
+</details>
 
 ### 客户端配置（两边一致）
 

@@ -6,12 +6,13 @@
 | | [android/](android/) | [windows/](windows/) |
 |---|---|---|
 | 语言 | Kotlin / Jetpack Compose | Python（零第三方依赖） |
-| 界面 | Material 3 | 命令行 |
+| 界面 | Material 3（MD3 Expressive 形状） | 终端 TUI / 命令行 |
 | 账户提取 | ✅ root 转储进程内存 | — （手动填 uuid） |
 | 本地代理 | ✅ 前台服务 | ✅ |
 | 流式 SSE | ✅ 透传 / 本地合成 | ✅ 透传 / 本地合成 |
-| 多账户 | ✅ UI 切换 | ✅ `--active` 切换 |
-| 导入导出 | ✅ | — |
+| 多账户 | ✅ UI 切换 | ✅ TUI 切换 / `--active` |
+| 导入导出 | ✅ | ✅ |
+| 结构化日志 | ✅ 每次调用完整记录 | ✅ TUI 面板 |
 
 ---
 
@@ -47,12 +48,22 @@ MiniTavern 后端有三个特性让通用客户端接不上：
 
 ### Windows
 
+带终端界面的版本（推荐），零第三方依赖：
+
 ```bash
 cd windows
 copy config.example.json config.json    # 填入 uuid / clientId
 python mtbridge.py --check              # 自检
-python mtbridge.py                      # 启动
+python mtbridge_tui.py                   # 启动代理 + TUI
 ```
+
+界面里可切换账户、改名、停用、导入导出。不想开界面（比如跑成服务）时：
+
+```bash
+python mtbridge.py                      # 纯命令行，等价于 TUI 的 --headless
+```
+
+详见 [windows/TUI.md](windows/TUI.md)。
 
 ### 安卓
 
@@ -65,7 +76,19 @@ cd android
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-启动后点「扫描设备」→「启动代理」。
+启动后在**账户页**点「扫描设备」提取账户（已从首页移过来），再到首页点「启动代理」。
+
+<details>
+<summary>在 arm64 / Termux 上构建？</summary>
+
+Gradle 默认从 Maven 拉的 `aapt2` 是 x86_64 二进制，arm64 上会报
+`Failed to start AAPT2 process`。改用系统自带的 aapt2 即可：
+
+```properties
+# ~/.gradle/gradle.properties
+android.aapt2FromMavenOverride=/data/data/com.termux/files/usr/bin/aapt2
+```
+</details>
 
 ### 客户端配置（两边一致）
 
@@ -74,6 +97,9 @@ Base URL   http://127.0.0.1:8787/v1
 API Key    任意字符串
 Path       /chat/completions
 ```
+
+端口在配置文件里改（安卓端固定 8787）。**注意同一台设备上只能跑一个实例**，
+两个都监听 8787 时后启动的那个会启动失败。
 
 ---
 
@@ -113,6 +139,17 @@ Header: X-Client-Id: <clientId>
 响应里 `title` 是内部短 id（`m1`、`tuzi-vision13`），`model` 是后端要求的完整名。
 后端**只认完整名**，传短 id 会报 `model_not_found`。两个实现都做了自动转换。
 
+上游这一个接口里**两种名字都给了**（`title` 短 id、`name`/`model` 全名），
+所以不经过本工具也能直接查：
+
+```bash
+curl -s https://monitor.mini-tavern.com/api/api-keys/list \
+     -H "X-Client-Id: <clientId>"
+```
+
+`GET /v1/models` 的 `id` 用**真实全名**（如 `deepseek/deepseek-v3.2-exp`），
+短 id 放在 `mtb_id` 字段；发请求时两种写法都接受。
+
 ---
 
 ## 已知限制
@@ -133,10 +170,30 @@ Header: X-Client-Id: <clientId>
 
 ---
 
+## 配额
+
+后端**没有可用的配额查询接口**——`GET /api/users/getAdQuota` 返回
+`{"quota":0,"time":0}` 且带 `errorCode: GET_AD_QUOTA_FAILED`。
+
+配额的唯一来源是**任意一次对话响应里的 `otherInfo`**：
+
+```json
+"otherInfo": { "totalQuota": 100, "usedQuota": 2, "model": "m1" }
+```
+
+所以查询手段是发一个 `max_tokens: 1` 的极小请求再读 `otherInfo`。
+安卓首页的配额卡片、windows TUI 的账户表都会自动这么做。
+
+---
+
 ## 安全
 
-`uuid` 等同于账户密码。`.gitignore` 已排除 `config.json`、`token*.txt`、
-`local.properties` 等敏感文件。**导出/复制配置时请勿外传。**
+`uuid` 等同于账户密码。`.gitignore` 已排除 `config.json`、`st.json`、`mm.json`、
+`token*.txt`、`local.properties` 等敏感文件。**导出/复制配置时请勿外传。**
+
+> `windows/st.json` 是 TUI 的运行期快照，会带上活动账户的 uuid。
+> 曾经误提交过一次，已从 git 历史中清除——但这也说明**凭据一旦进过
+> 仓库就必须当作已泄漏**处理，改历史不能撤销已经发生的曝光。
 
 ---
 

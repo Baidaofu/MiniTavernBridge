@@ -1,8 +1,15 @@
-# mtbridge — Windows 命令行版
+# mtbridge — Windows 版
 
 把 MiniTavern 会员代理包装成 OpenAI 兼容端点。零第三方依赖，只用 Python 标准库。
 
-安卓版见 [`../android`](../android)（功能一致，UI 为 Material 3）。
+**两个脚本**：
+
+| 脚本 | 用途 |
+|---|---|
+| `mtbridge_tui.py` | **日常用这个**。自带终端界面，同时跑代理 |
+| `mtbridge.py` | 无界面的纯命令行版（被 TUI 复用，自检也走它） |
+
+安卓版见 [`../android`](../android)（功能一致，MD3 Expressive 界面）。
 
 ---
 
@@ -17,8 +24,17 @@ copy config.example.json config.json
 # 3. 自检（配置合法性 + 上游连通性 + 端口占用）
 python mtbridge.py --check
 
-# 4. 启动
-python mtbridge.py
+# 4. 启动：代理 + 终端界面
+python mtbridge_tui.py
+```
+
+界面里可切换账户、改名、停用/启用、删除、看配额与最近调用。
+详见 [TUI.md](TUI.md)。
+
+不想开界面（跑成后台服务、放脚本里）时用：
+
+```bash
+python mtbridge.py            # 等价于 mtbridge_tui.py --headless
 ```
 
 客户端里填：
@@ -35,12 +51,18 @@ Path       /chat/completions
 
 | 命令 | 作用 |
 |---|---|
-| `python mtbridge.py` | 用 `./config.json` 启动服务 |
-| `python mtbridge.py -c other.json` | 指定配置文件 |
-| `python mtbridge.py --check` | 只做配置 / 网络 / 端口自检后退出 |
+| `python mtbridge_tui.py` | **推荐**。启动代理 + 终端界面 |
+| `python mtbridge_tui.py --headless` | 只跑代理不开界面 |
+| `python mtbridge_tui.py --port 8899` | 覆盖配置里的端口 |
+| `python mtbridge_tui.py --export 账户.json` | 导出账户列表后退出 |
+| `python mtbridge_tui.py --import 账户.json` | 导入账户列表后退出（可加 `--replace`） |
+| `python mtbridge.py` | 纯命令行启动（无界面） |
+| `python mtbridge.py --check` | 配置 / 网络 / 端口自检后退出 |
 | `python mtbridge.py --test` | 启动并对各端点发一次真实请求 |
 | `python mtbridge.py --active "手机B"` | 切换活动账户并写回配置 |
 | `python mtbridge.py -v` | 打开调试日志 |
+
+> TUI 在非交互终端（管道、重定向、CI）下会自动转为 headless。
 
 ---
 
@@ -154,5 +176,24 @@ python mtbridge.py --active phoneA
 持续统计 `signature_ok` / `signature_fail` / `nonce_replay`）。
 **这实质上违反其服务条款，封号风险由使用者自行承担。**
 
-`config.json` 里的 `uuid` 等同于账户密码，请勿提交到公开仓库
-（`.gitignore` 已排除）。
+## 配额
+
+后端**没有可用的配额查询接口**——`GET /api/users/getAdQuota` 返回
+`{"quota":0,"time":0}` 且带 `errorCode: GET_AD_QUOTA_FAILED`。
+
+配额的唯一来源是任意一次对话响应里的 `otherInfo`：
+
+```json
+"otherInfo": { "totalQuota": 100, "usedQuota": 2, "model": "m1" }
+```
+
+TUI 的账户表会在每次调用后自动更新，也可以 `GET /v1/accounts` 查各账户配额。
+
+---
+
+## 安全
+
+`config.json` 里的 `uuid` 等同于账户密码，**不要提交到公开仓库**。
+
+TUI 会在同目录生成 `st.json`（运行期快照，**含活动账户 uuid**）和 `mm.json`
+（模型目录缓存）。这两个都是运行产物，已在 `.gitignore` 里。
