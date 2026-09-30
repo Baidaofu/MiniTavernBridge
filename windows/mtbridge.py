@@ -215,23 +215,27 @@ class Upstream:
 
     # -- 聊天 ---------------------------------------------------------------
 
-    def chat(self, account: dict, payload: dict) -> tuple[str, dict | None]:
+    def open_chat(self, account: dict, payload: dict):
+        """打开一次 chat 调用，返回 (status, content_type, response)。
+
+        response 的 body 还没读，调用方可以逐块读取上游 SSE；用完必须 close。
+        非 2xx 仍由 urllib 抛 HTTPError，交给调用方处理。
+        """
         obj = dict(payload)
         obj["uuid"] = account["uuid"]
-        _, text = self._open(self.cfg.chat_url, "POST", json.dumps(obj),
-                             account["clientId"])
-        quota = None
-        try:
-            info = json.loads(text).get("otherInfo")
-            if isinstance(info, dict):
-                quota = {
-                    "total": info.get("totalQuota", 0),
-                    "used": info.get("usedQuota", 0),
-                    "internalModel": info.get("model", ""),
-                }
-        except Exception:  # noqa: BLE001
-            pass
-        return text, quota
+        req = urllib.request.Request(self.cfg.chat_url,
+                                     data=json.dumps(obj).encode("utf-8"),
+                                     method="POST")
+        req.add_header("X-Client-Id", account["clientId"])
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Accept", "text/event-stream, application/json"
+                       if obj.get("stream") else "application/json")
+        # 认证头不发送：后端完全忽略 Authorization / JWT。
+        ctx = self._ssl_ctx() if self.cfg.chat_url.startswith("https") else None
+        resp = urllib.request.urlopen(req, timeout=self.cfg.request_timeout,
+                                      context=ctx)
+        ctype = (resp.headers.get_content_type() or "").lower()
+        return resp.status, ctype, resp
 
 
 # ------------------------------------------------------------------ 服务
@@ -245,6 +249,48 @@ class State:
 
 
 STATE = State()
+
+
+# ---------------------------------------------------------- 流式辅助工具
+
+def _quota_from(info: dict) -> dict:
+    return {
+        "total": info.get("totalQuota", 0),
+        "used": info.get("usedQuota", 0),
+        "internalModel": info.get("model", ""),
+    }
+
+
+def parse_quota(text: str) -> dict | None:
+    """从一份完整 JSON 或一段 SSE 事件里找出 otherInfo 配额。"""
+    def scan(blob: str) -> dict | None:
+        try:
+            obj = json.loads(blob)
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(obj, dict) and isinstance(obj.get("otherInfo"), dict):
+            return _quota_from(obj["otherInfo"])
+        return None
+
+    hit = scan(text)
+    if hit:
+        return hit
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]" or not payload.startswith("{"):
+            continue
+        hit = scan(payload)
+        if hit:
+            return hit
+    return None
+
+
+def split_pieces(text: str, size: int = 64) -> list[str]:
+    """切片。Python 的 str 按码点索引，不会切开代理对。"""
+    return [text[i:i + size] for i in range(0, len(text), size)] or []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -402,22 +448,240 @@ class Handler(BaseHTTPRequestHandler):
             self._err(400, f"未知模型 {requested!r}；请用 /v1/models 里的 id 或完整名")
 
         STATE.requests += 1
+        want_stream = bool(payload.get("stream"))
+
         try:
-            text, quota = STATE.upstream.chat(acc, payload)
+            _, ctype, resp = STATE.upstream.open_chat(acc, payload)
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")
-            log(f"上游 HTTP {e.code}: {detail[:160]}", level="WARN")
-            self._err(e.code, detail[:400])
-            return
+            if not want_stream:
+                log(f"上游 HTTP {e.code}: {detail[:160]}", level="WARN")
+                self._err(e.code, detail[:400])
+                return
+            # 客户端要流式，上游可能根本不认 stream 参数：去掉标志重试，
+            # 成功后由本地把整包 JSON 切成 SSE。
+            log(f"上游拒绝 stream（HTTP {e.code}），回退非流式并本地切片："
+                f"{detail[:120]}", level="WARN")
+            payload.pop("stream", None)
+            try:
+                _, ctype, resp = STATE.upstream.open_chat(acc, payload)
+            except urllib.error.HTTPError as e2:
+                d2 = e2.read().decode("utf-8", "replace")
+                log(f"上游 HTTP {e2.code}: {d2[:160]}", level="WARN")
+                self._err(e2.code, d2[:400])
+                return
+            except Exception as e2:  # noqa: BLE001
+                log(f"上游异常：{e2}", level="ERROR")
+                self._err(502, f"{type(e2).__name__}: {e2}")
+                return
         except Exception as e:  # noqa: BLE001
             log(f"上游异常：{e}", level="ERROR")
             self._err(502, f"{type(e).__name__}: {e}")
             return
 
+        with resp:
+            if want_stream and ctype == "text/event-stream":
+                self._relay_sse(resp, acc)          # ① 上游真流式 → 透传
+            elif want_stream:
+                text = resp.read().decode("utf-8", "replace")
+                self._synthetic_sse(text, acc, payload.get("model", ""))
+            elif ctype == "text/event-stream":
+                text = resp.read().decode("utf-8", "replace")
+                self._accumulate_sse(text, acc, payload.get("model", ""))
+            else:
+                text = resp.read().decode("utf-8", "replace")
+                self._note_quota(acc, parse_quota(text))
+                self._send(200, text.encode("utf-8"))
+
+    # -- 流式实现 -----------------------------------------------------------
+
+    def _note_quota(self, acc: dict, quota: dict | None):
         if quota:
             STATE.quota[acc["uuid"]] = quota
             log(f"配额 {quota['used']}/{quota['total']} · {quota['internalModel']}")
-        self._send(200, text.encode("utf-8"))
+
+    def _sse_head(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers()
+        self.close_connection = True
+
+    def _sse_send(self, data: bytes):
+        """写一个 HTTP chunk 并立即 flush —— 客户端才能逐块收到。"""
+        self.wfile.write(f"{len(data):X}\r\n".encode("ascii") + data + b"\r\n")
+        self.wfile.flush()
+
+    def _sse_end(self):
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+    def _relay_sse(self, resp, acc: dict):
+        """上游就是 SSE：原样逐事件透传。"""
+        log("上游流式响应，逐块透传")
+        self._sse_head()
+        event: list[str] = []
+        quota = None
+        saw_done = False
+
+        def flush():
+            nonlocal event, quota, saw_done
+            if not event:
+                return
+            blob = "\n".join(event) + "\n\n"
+            self._sse_send(blob.encode("utf-8"))
+            quota = parse_quota(blob) or quota
+            if "[DONE]" in blob:
+                saw_done = True
+            event = []
+
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if line:
+                event.append(line)
+                continue
+            flush()
+        flush()
+        # 上游实测不发 data: [DONE] 就断开，严格按 OpenAI 语义的客户端会等到超时
+        if not saw_done:
+            self._sse_send(b"data: [DONE]\n\n")
+        self._sse_end()
+        self._note_quota(acc, quota)
+
+    def _synthetic_sse(self, text: str, acc: dict, model: str):
+        """上游只给整包 JSON：本地切成 OpenAI 风格的 chat.completion.chunk。"""
+        log("上游返回整包 JSON，本地合成 SSE 流")
+        self._note_quota(acc, parse_quota(text))
+
+        try:
+            root = json.loads(text)
+        except Exception:  # noqa: BLE001
+            root = None
+
+        cid = "chatcmpl-mtb"
+        created = int(time.time())
+        out_model = model
+        usage = None
+        contents: dict[int, str] = {}
+        finishes: dict[int, str] = {}
+        if isinstance(root, dict):
+            cid = root.get("id") or cid
+            created = root.get("created") or created
+            out_model = root.get("model") or out_model
+            usage = root.get("usage")
+            for i, c in enumerate(root.get("choices") or []):
+                if not isinstance(c, dict):
+                    continue
+                idx = c.get("index", i)
+                msg = c.get("message") or {}
+                content = (msg.get("content") or c.get("text") or text)
+                contents[idx] = content
+                finishes[idx] = c.get("finish_reason") or "stop"
+        if not contents:
+            # 结构不认识：把整包文本当一个 delta 交出去，客户端至少能收到内容
+            contents[0] = text
+            finishes[0] = "stop"
+
+        self._sse_head()
+
+        def emit(choices: list[dict]):
+            obj = {"id": cid, "object": "chat.completion.chunk",
+                   "created": created, "model": out_model, "choices": choices}
+            blob = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+            self._sse_send(f"data: {blob}\n\n".encode("utf-8", "replace"))
+
+        # ① 首包：role
+        emit([{"index": i, "delta": {"role": "assistant", "content": ""},
+               "finish_reason": None} for i in contents])
+        # ② 正文：多 choice 同步推进
+        pieces = {i: split_pieces(v) for i, v in contents.items()}
+        rounds = max((len(v) for v in pieces.values()), default=0)
+        for r in range(rounds):
+            arr = [{"index": i, "delta": {"content": lst[r]}, "finish_reason": None}
+                   for i, lst in pieces.items() if r < len(lst)]
+            if arr:
+                emit(arr)
+        # ③ 收尾
+        emit([{"index": i, "delta": {}, "finish_reason": finishes[i]}
+              for i in contents])
+        # ④ usage 单独一包（choices 为空），与 OpenAI 语义一致
+        if isinstance(usage, dict):
+            obj = {"id": cid, "object": "chat.completion.chunk",
+                   "created": created, "model": out_model,
+                   "choices": [], "usage": usage}
+            blob = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+            self._sse_send(f"data: {blob}\n\n".encode("utf-8", "replace"))
+
+        self._sse_send(b"data: [DONE]\n\n")
+        self._sse_end()
+
+    def _accumulate_sse(self, raw: str, acc: dict, model: str):
+        """客户端要 JSON、上游却给 SSE：把增量重新拼回一份完整响应。"""
+        if "data:" not in raw:
+            # 声称是 SSE 却不是 → 当普通 JSON 交出去
+            self._note_quota(acc, parse_quota(raw))
+            self._send(200, raw.encode("utf-8"))
+            return
+        log("客户端要非流式，上游给 SSE，累积后返回")
+
+        cid, created, out_model = "chatcmpl-mtb", None, ""
+        finish = "stop"
+        usage = other_info = None
+        contents: dict[int, list[str]] = {}
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]" or not payload.startswith("{"):
+                continue
+            try:
+                obj = json.loads(payload)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(obj, dict):
+                continue
+            cid = obj.get("id") or cid
+            created = created or obj.get("created")
+            out_model = obj.get("model") or out_model
+            if isinstance(obj.get("usage"), dict):
+                usage = obj["usage"]
+            if isinstance(obj.get("otherInfo"), dict):
+                other_info = obj["otherInfo"]
+            for i, c in enumerate(obj.get("choices") or []):
+                if not isinstance(c, dict):
+                    continue
+                idx = c.get("index", i)
+                if c.get("finish_reason"):
+                    finish = c["finish_reason"]
+                delta = c.get("delta") or {}
+                piece = delta.get("content") or ""
+                if piece:
+                    contents.setdefault(idx, []).append(piece)
+
+        resp: dict[str, Any] = {
+            "id": cid,
+            "object": "chat.completion",
+            "created": created or int(time.time()),
+            "model": out_model or model,
+            "choices": [
+                {"index": i, "message": {"role": "assistant",
+                                          "content": "".join(parts)},
+                 "finish_reason": finish}
+                for i, parts in (contents or {0: [""]}).items()
+            ],
+        }
+        if usage:
+            resp["usage"] = usage
+        if other_info:
+            resp["otherInfo"] = other_info
+        self._note_quota(acc, _quota_from(other_info) if other_info else None)
+        self._send(200, json.dumps(resp, ensure_ascii=False).encode("utf-8"))
 
 
 # ------------------------------------------------------------------ 自检

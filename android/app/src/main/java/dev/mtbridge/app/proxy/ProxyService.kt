@@ -61,13 +61,22 @@ class ProxyService : Service() {
 
     private fun startProxy() {
         val app = applicationContext as MtApp
+        // 重复 START 时先停掉上一个实例，否则端口被自己占住，
+        // 第二次 bind 会抛 EADDRINUSE 把整个进程带崩。
+        server?.stop()
+        server = null
         val port = app.settings.value.port
         val s = ProxyServer(
             port = port,
             activeAccount = { app.store.active },
             onModels = { uuid -> app.cachedModels(uuid) },
         )
-        s.start()
+        if (!s.start()) {
+            // 常见原因：另一个 mtbridge（debug/release 两份）正占着 8787。
+            updateNotification("启动失败 · 端口 $port 不可用")
+            stopSelf()
+            return
+        }
         server = s
         val acc = app.store.active
         updateNotification(

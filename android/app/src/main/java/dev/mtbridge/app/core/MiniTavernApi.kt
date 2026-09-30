@@ -63,26 +63,84 @@ object MiniTavernApi {
         }
     }
 
+    /** Upstream answered with a non-2xx status; [code] is what it said. */
+    class UpstreamHttpError(val code: Int, message: String) : Exception(message)
+
     /**
-     * Performs one chat call. Returns the raw response body plus any quota
-     * counters found in `otherInfo`.
+     * An opened upstream chat call: the body is NOT consumed yet, so the caller
+     * can relay an SSE stream chunk by chunk. Always [close] it.
      */
-    fun chat(uuid: String, clientId: String, payload: JSONObject): Result<Pair<String, QuotaInfo?>> =
+    class ChatUpstream(
+        private val conn: HttpURLConnection,
+        val contentType: String,
+    ) : java.io.Closeable {
+        val body: java.io.InputStream get() = conn.inputStream
+        val isEventStream: Boolean
+            get() = contentType.substringBefore(';').trim()
+                .equals("text/event-stream", ignoreCase = true)
+        override fun close() {
+            runCatching { conn.inputStream.close() }
+            conn.disconnect()
+        }
+    }
+
+    /**
+     * Opens a chat completion call and hands back the live response stream.
+     * Non-2xx becomes a failed [Result] whose message carries the upstream body.
+     */
+    fun openChat(uuid: String, clientId: String, payload: JSONObject): Result<ChatUpstream> =
         runCatching {
             val obj = JSONObject(payload.toString())
             obj.put("uuid", uuid)
-            val (code, text) = open("/api/ai-proxy/chat/completions", "POST", obj.toString())
-            if (code !in 200..299) error("HTTP $code: ${text.take(300)}")
-            val quota = runCatching {
-                val oi = JSONObject(text).optJSONObject("otherInfo") ?: return@runCatching null
-                QuotaInfo(
-                    total = oi.optInt("totalQuota", 0),
-                    used = oi.optInt("usedQuota", 0),
-                    internalModel = oi.optString("model", ""),
-                )
-            }.getOrNull()
-            text to quota
+            val stream = obj.optBoolean("stream", false)
+            val conn = URL(Constants.UPSTREAM + "/api/ai-proxy/chat/completions")
+                .openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 300_000
+            conn.setRequestProperty("X-Client-Id", clientId)
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty(
+                "Accept",
+                if (stream) "text/event-stream, application/json" else "application/json",
+            )
+            conn.doOutput = true
+            conn.outputStream.use { it.write(obj.toString().toByteArray()) }
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                val err = conn.errorStream
+                    ?.let { BufferedReader(InputStreamReader(it)).use(BufferedReader::readText) }
+                    .orEmpty()
+                conn.disconnect()
+                throw UpstreamHttpError(code, "HTTP $code: ${err.take(300)}")
+            }
+            ChatUpstream(conn, conn.contentType.orEmpty())
         }
+
+    /**
+     * Pulls `otherInfo` quota counters out of a complete response body — either
+     * a JSON document or a batch of `data:` SSE events.
+     */
+    fun quotaOf(body: String): QuotaInfo? {
+        quotaIn(body)?.let { return it }
+        for (line in body.lineSequence()) {
+            val t = line.trim()
+            if (!t.startsWith("data:")) continue
+            val payload = t.removePrefix("data:").trim()
+            if (payload == "[DONE]" || !payload.startsWith("{")) continue
+            quotaIn(payload)?.let { return it }
+        }
+        return null
+    }
+
+    private fun quotaIn(json: String): QuotaInfo? = runCatching {
+        val oi = JSONObject(json).optJSONObject("otherInfo") ?: return@runCatching null
+        QuotaInfo(
+            total = oi.optInt("totalQuota", 0),
+            used = oi.optInt("usedQuota", 0),
+            internalModel = oi.optString("model", ""),
+        )
+    }.getOrNull()
 
     /** Cheap round trip used to refresh a cached quota reading. */
     fun probeQuota(uuid: String, clientId: String, model: String): Result<QuotaInfo> = runCatching {
