@@ -12,6 +12,9 @@ import dev.mtbridge.app.ui.icons.Person
 import dev.mtbridge.app.ui.icons.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -168,13 +171,18 @@ class MainActivity : ComponentActivity() {
 
 
         Scaffold(
-            // 导航栏上方那条黑边：窗口是 edge-to-edge，NavigationBar 自己的
-            // surface 没盖住底色。显式给 containerColor 与 0 elevation 即可。
+            // 窗口是 edge-to-edge（导航栏透明），Scaffold 默认会消费系统底部
+            // inset 并把它算成内容区的 padding，而 NavigationBar 默认又不
+            // 把手势区画上自己的背景 —— 中间就空出一条纯黑。
+            // 这里把 contentWindowInsets 清零，改由 NavigationBar 自己吃
+            // navigationBars inset 并绘制到底。
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
             containerColor = MaterialTheme.colorScheme.surface,
             bottomBar = {
                 NavigationBar(
                     containerColor = MaterialTheme.colorScheme.surfaceContainer,
                     tonalElevation = 0.dp,
+                    windowInsets = WindowInsets.navigationBars,
                 ) {
                     listOf(
                         Triple("首页", Home, Home),
@@ -194,7 +202,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         ) { pad ->
-            Box(Modifier.padding(pad)) {
+            Box(
+                Modifier
+                    .padding(pad)
+                    .consumeWindowInsets(pad)
+            ) {
                 when (tab) {
                     0 -> HomeScreen(
                         rootOk = rootOk,
