@@ -54,8 +54,7 @@ fun HomeScreen(
     accounts: List<Account>,
     models: List<MiniTavernApi.RemoteModel>,
     modelError: String?,
-    scanning: Boolean,
-    onScan: () -> Unit,
+    probing: Boolean,
     onStartProxy: () -> Unit,
     onStopProxy: () -> Unit,
     onRefreshQuota: () -> Unit,
@@ -74,7 +73,7 @@ fun HomeScreen(
         ) {
 
             item {
-                Card(Modifier.fillMaxWidth()) {
+                Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("运行状态", style = MaterialTheme.typography.titleMedium)
                         StatusRow("root 权限", if (rootOk) "已获取" else "未获取", rootOk)
@@ -106,36 +105,16 @@ fun HomeScreen(
                 }
             }
 
-            item { QuotaCard(account) }
-
             item {
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("提取账户", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "需要 root。App 会从 MiniTavern 进程内存中读取已解密的会话信息。" +
-                                "请确保 MiniTavern 已安装并处于登录状态。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Button(onClick = onScan, enabled = rootOk && !scanning) {
-                            if (scanning) {
-                                CircularProgressIndicator(
-                                    Modifier.size(18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                )
-                                Text(" 扫描中…")
-                            } else {
-                                Icon(Radar, null); Text(" 扫描设备")
-                            }
-                        }
-                    }
-                }
+                QuotaCard(
+                    account = account,
+                    probing = probing,
+                    onRefresh = onRefreshQuota,
+                )
             }
 
             item {
-                Card(Modifier.fillMaxWidth()) {
+                Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Row(
                             Modifier.fillMaxWidth(),
@@ -182,9 +161,6 @@ fun HomeScreen(
                                     )
                                 }
                             }
-                        }
-                        OutlinedButton(onClick = onRefreshQuota, enabled = account != null) {
-                            Text("刷新配额")
                         }
                     }
                 }

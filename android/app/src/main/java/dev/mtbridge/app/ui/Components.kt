@@ -3,10 +3,17 @@ package dev.mtbridge.app.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -21,30 +28,36 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * 剩余配额卡。
+ *
+ * 检测会真的发一次请求消耗配额，所以按钮上写明了代价。
+ */
 @Composable
-fun QuotaCard(account: Account?, modifier: Modifier = Modifier) {
+fun QuotaCard(
+    account: Account?,
+    probing: Boolean,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Card(
         modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(28.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-        ),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("剩余配额", style = MaterialTheme.typography.titleMedium)
-                if (account != null) {
-                    Text(
-                        "${account.quotaLeft} / ${account.quotaTotal}",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                    )
-                } else {
-                    Text("—", style = MaterialTheme.typography.headlineSmall)
-                }
+                Text(
+                    if (account != null) "${account.quotaLeft} / ${account.quotaTotal}" else "—",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                )
             }
 
             if (account != null && account.quotaTotal > 0) {
@@ -52,6 +65,7 @@ fun QuotaCard(account: Account?, modifier: Modifier = Modifier) {
                 LinearProgressIndicator(
                     progress = { frac },
                     modifier = Modifier.fillMaxWidth(),
+                    strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
                 )
             }
 
@@ -67,14 +81,35 @@ fun QuotaCard(account: Account?, modifier: Modifier = Modifier) {
                     "最后更新  ${account.quotaUpdatedAt.fmtDateTime()}",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Text(
-                    // The backend exposes no quota-reset endpoint (getAdQuota
-                    // returns quota:0 time:0), so this is observational only.
-                    "重置时间  后端未提供该接口",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
+
+            Spacer(Modifier.height(2.dp))
+            Button(
+                onClick = onRefresh,
+                enabled = account != null && !probing,
+                shape = RoundedCornerShape(20.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (probing) {
+                    CircularProgressIndicator(
+                        Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                    Text("  检测中…")
+                } else {
+                    Text("检测剩余配额")
+                }
+            }
+            Text(
+                "检测会实际发送一次请求，消耗 1 点配额",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

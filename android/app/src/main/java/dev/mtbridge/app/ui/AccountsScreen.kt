@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -21,10 +22,14 @@ import dev.mtbridge.app.ui.icons.Download
 import dev.mtbridge.app.ui.icons.Edit
 import dev.mtbridge.app.ui.icons.RadioButtonChecked
 import dev.mtbridge.app.ui.icons.RadioButtonUnchecked
+import dev.mtbridge.app.ui.icons.Radar
 import dev.mtbridge.app.ui.icons.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -63,6 +68,9 @@ fun AccountsScreen(
     onAddManual: (String, String) -> Unit,
     onImport: () -> Unit,
     onExport: () -> Unit,
+    rootOk: Boolean,
+    scanning: Boolean,
+    onScan: () -> Unit,
     debugUnlocked: Boolean,
     onDebugUnlocked: () -> Unit,
     onNewTestAccount: () -> Unit,
@@ -101,6 +109,42 @@ fun AccountsScreen(
             modifier = Modifier.fillMaxSize().padding(pad).padding(horizontal = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            item {
+                Card(
+                    Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(28.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                ) {
+                    Column(Modifier.padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("提取账户", style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer)
+                        Text(
+                            "需要 root。从 MiniTavern 进程内存读取已解密的会话信息，" +
+                                "请确保它已安装并处于登录状态。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                        Button(
+                            onClick = onScan,
+                            enabled = rootOk && !scanning,
+                            shape = RoundedCornerShape(20.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            if (scanning) {
+                                CircularProgressIndicator(
+                                    Modifier.size(16.dp), strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary)
+                                Text(" 扫描中…")
+                            } else {
+                                Icon(Radar, null, Modifier.size(18.dp)); Text(" 扫描设备")
+                            }
+                        }
+                    }
+                }
+            }
+
             item {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -166,7 +210,7 @@ fun AccountsScreen(
 
             if (accounts.isEmpty()) {
                 item {
-                    Card(Modifier.fillMaxWidth()) {
+                    Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("还没有账户", style = MaterialTheme.typography.titleMedium)
                             Text(
@@ -181,7 +225,7 @@ fun AccountsScreen(
 
             items(accounts, key = { it.uuid }) { acc ->
                 val isActive = acc.uuid == activeUuid
-                Card(Modifier.fillMaxWidth()) {
+                Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
                     Row(
                         Modifier.fillMaxWidth().padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically,

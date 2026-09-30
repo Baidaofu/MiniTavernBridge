@@ -14,6 +14,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -27,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import dev.mtbridge.app.core.Account
 import dev.mtbridge.app.core.Bus
@@ -100,6 +103,7 @@ class MainActivity : ComponentActivity() {
         var rootOk by remember { mutableStateOf(false) }
         var proxyRunning by remember { mutableStateOf(false) }
         var scanning by remember { mutableStateOf(false) }
+        var probing by remember { mutableStateOf(false) }
         var models by remember { mutableStateOf<List<MiniTavernApi.RemoteModel>>(emptyList()) }
         var modelError by remember { mutableStateOf<String?>(null) }
         var editing by remember { mutableStateOf<Account?>(null) }
@@ -146,23 +150,32 @@ class MainActivity : ComponentActivity() {
 
         fun refreshQuota() {
             val acc = account ?: return
+            probing = true
             scope.launch {
                 val probeModel = models.firstOrNull()?.name ?: "deepseek/deepseek-v3.2-exp"
                 val r = withContext(Dispatchers.IO) {
                     MiniTavernApi.probeQuota(acc.uuid, acc.clientId, probeModel)
                 }
+                probing = false
                 r.onSuccess {
                     app.store.updateQuota(acc.uuid, it)
-                    snackbar.showSnackbar("配额 ${it.used}/${it.total}")
+                    snackbar.showSnackbar("配额 ${it.used}/${it.total}（本次检测消耗 1 点）")
                 }.onFailure {
                     snackbar.showSnackbar("配额获取失败: ${it.message}")
                 }
             }
         }
 
+
         Scaffold(
+            // 导航栏上方那条黑边：窗口是 edge-to-edge，NavigationBar 自己的
+            // surface 没盖住底色。显式给 containerColor 与 0 elevation 即可。
+            containerColor = MaterialTheme.colorScheme.surface,
             bottomBar = {
-                NavigationBar {
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    tonalElevation = 0.dp,
+                ) {
                     listOf(
                         Triple("首页", Home, Home),
                         Triple("账户", Person, Person),
@@ -173,6 +186,9 @@ class MainActivity : ComponentActivity() {
                             onClick = { tab = i },
                             icon = { Icon(item.second, item.first) },
                             label = { Text(item.first) },
+                            colors = NavigationBarItemDefaults.colors(
+                                indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+                            ),
                         )
                     }
                 }
@@ -188,8 +204,7 @@ class MainActivity : ComponentActivity() {
                         accounts = accounts,
                         models = models,
                         modelError = modelError,
-                        scanning = scanning,
-                        onScan = { scanNow() },
+                        probing = probing,
                         onStartProxy = {
                             ProxyService.start(this@MainActivity, app.settings.value.port)
                             proxyRunning = true
@@ -225,6 +240,9 @@ class MainActivity : ComponentActivity() {
                         },
                         onImport = onImport,
                         onExport = onExport,
+                        rootOk = rootOk,
+                        scanning = scanning,
+                        onScan = { scanNow() },
                         debugUnlocked = debugUnlocked,
                         onDebugUnlocked = { debugUnlocked = true },
                         onNewTestAccount = {

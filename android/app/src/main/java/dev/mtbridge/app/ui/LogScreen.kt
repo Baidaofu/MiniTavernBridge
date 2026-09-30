@@ -121,7 +121,7 @@ fun LogScreen(entries: List<LogEntry>) {
 private fun SummaryCard(total: Int, calls: Int, events: Int, quota: Pair<Int, Int?>?) {
     Card(
         Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
+        shape = RoundedCornerShape(28.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer),
     ) {
@@ -171,7 +171,7 @@ private fun EntryCard(e: LogEntry, open: Boolean, onToggle: () -> Unit, onCopy: 
         modifier = Modifier
             .fillMaxWidth()
             .then(if (hasDetail) Modifier.clickable { onToggle() } else Modifier),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
     ) {
@@ -240,7 +240,7 @@ private fun EntryCard(e: LogEntry, open: Boolean, onToggle: () -> Unit, onCopy: 
 
 @Composable
 private fun EmptyHint(msg: String) {
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         Text(msg, Modifier.padding(24.dp), style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
