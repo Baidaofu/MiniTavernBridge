@@ -186,17 +186,6 @@ curl -s https://monitor.mini-tavern.com/api/api-keys/list \
 
 ---
 
-## 安全
-
-`uuid` 等同于账户密码。`.gitignore` 已排除 `config.json`、`st.json`、`mm.json`、
-`token*.txt`、`local.properties` 等敏感文件。**导出/复制配置时请勿外传。**
-
-> `windows/st.json` 是 TUI 的运行期快照，会带上活动账户的 uuid。
-> 曾经误提交过一次，已从 git 历史中清除——但这也说明**凭据一旦进过
-> 仓库就必须当作已泄漏**处理，改历史不能撤销已经发生的曝光。
-
----
-
 ## 合规提示
 
 本工具绕过 MiniTavern App 的设备签名校验（后端 `/api/auth/app/metrics`

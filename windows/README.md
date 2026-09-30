@@ -190,10 +190,3 @@ python mtbridge.py --active phoneA
 TUI 的账户表会在每次调用后自动更新，也可以 `GET /v1/accounts` 查各账户配额。
 
 ---
-
-## 安全
-
-`config.json` 里的 `uuid` 等同于账户密码，**不要提交到公开仓库**。
-
-TUI 会在同目录生成 `st.json`（运行期快照，**含活动账户 uuid**）和 `mm.json`
-（模型目录缓存）。这两个都是运行产物，已在 `.gitignore` 里。
