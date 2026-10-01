@@ -360,7 +360,7 @@ def draw(cfg, port: int, st: dict, sel: int) -> list[str]:
     rows = max(3, h - len(out) - 6)
     out.append("")
     out.append("  " + paint("账户", "white", "bold")
-               + paint("   ↑↓ / j k / 滚轮 选择 · Enter 切换 · e 停用 · d 删除 · R 刷新 · q 退出",
+               + paint("   ↑↓ / j k / 滚轮 选择 · Enter 切换 · e 停用 · d 删除 · R 刷新 · t×5 调试 · q 退出",
                        "grey"))
     if not accounts:
         out.append("    " + paint("（空）按 i 或运行 --import_ 导入账户列表；也可直接编辑 config.json",
@@ -489,6 +489,8 @@ def run_tui(cfg_path: Path, port: int) -> int:
 
     sel = 0
     sel_sticky = 0.0          # 选中项的"最后操作时间"，仅用于提示
+    t_taps = 0                # 隐藏调试入口的连按计数
+    last_tap = 0.0
     with Term() as t:
         while True:
             t.render(draw(cfg, bound, st, sel))
@@ -544,6 +546,30 @@ def run_tui(cfg_path: Path, port: int) -> int:
                     _, models = mtbridge.Upstream(cfg).models(acc["clientId"])
                     st["model_count"] = len(models)
                     st["msg"] = f"模型 {len(models)}" if models else "获取模型失败"
+            elif val == "t":
+                # 隐藏的调试入口：连按 5 次 t 才解锁，对齐安卓版连点标题 5 次。
+                # 超过 3 秒间隔视为重新开始。
+                now = time.time()
+                t_taps = t_taps + 1 if now - last_tap < 3.0 else 1
+                last_tap = now
+                if t_taps >= 5:
+                    t_taps = 0
+                    st["msg"] = "正在开户…"
+                    t.render(draw(cfg, bound, st, sel))
+                    try:
+                        acc = mtbridge.add_test_account(cfg)
+                    except Exception as e:  # noqa: BLE001
+                        st["msg"] = f"开户失败：{e}"
+                    else:
+                        sel = max(0, len(cfg.accounts) - 1)
+                        q = (f"{acc['quotaUsed']}/{acc['quotaTotal']}"
+                             if acc.get("quotaTotal") else "?")
+                        st["msg"] = f"已创建 {acc.get('label')} 配额 {q}"
+                elif t_taps >= 3:
+                    st["msg"] = f"再按 {5 - t_taps} 次 t 解锁调试入口"
+            else:
+                if t_taps:
+                    t_taps = 0
             t.render(draw(cfg, bound, st, sel))
 
     httpd.shutdown()
