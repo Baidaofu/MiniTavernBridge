@@ -110,7 +110,7 @@ class Term:
         self._k32.SetConsoleMode(
             self._h, self._mode.value | 0x0004 | 0x0008 | 0x0080)
 
-    def __win_vt(self):
+    def _win_vt(self):
         """打开 stdout 的虚拟终端处理，否则所有 ANSI 序列（包括清行 \\x1b[K）
         都不会被解释，而是被当普通字符打印，或干脆静默失效导致残影。"""
         k32 = ctypes.windll.kernel32
@@ -123,11 +123,15 @@ class Term:
         self._out_handle, self._out_mode = h, mode.value
 
     def _win_restore(self):
-        if self._k32 is not None and self._h is not None:
-            self._k32.SetConsoleMode(self._h, self._mode.value)
-        if getattr(self, "_out_handle", None) is not None:
-            ctypes.windll.kernel32.SetConsoleMode(
-                self._out_handle, self._out_mode)
+        # 用 getattr：_win_setup 在非交互环境下会提前 return，
+        # 那些属性根本不存在，直接访问会在退出时抛 AttributeError。
+        k32 = getattr(self, "_k32", None)
+        h = getattr(self, "_h", None)
+        if k32 is not None and h is not None:
+            k32.SetConsoleMode(h, self._mode.value)
+        oh = getattr(self, "_out_handle", None)
+        if oh is not None:
+            ctypes.windll.kernel32.SetConsoleMode(oh, self._out_mode)
 
     # -- 鼠标 -------------------------------------------------------------
 
