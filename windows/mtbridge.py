@@ -64,6 +64,7 @@ class Config:
     def __init__(self, path: Path, data: dict):
         self.path = path
         self._raw = data
+        self._mtime = self._stat()
         listen = data.get("listen", {})
         upstream = data.get("upstream", {})
         self.host: str = listen.get("host", "127.0.0.1")
@@ -76,9 +77,43 @@ class Config:
         self.verify_tls: bool = bool(data.get("verify_tls", True))
         self.verbose: bool = bool(data.get("verbose", False))
 
+    def _stat(self) -> float:
+        try:
+            return self.path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def refresh_if_changed(self) -> bool:
+        """配置文件被外部改动（--import_、手动编辑）时重新读入。
+
+        服务只在启动时加载一次配置，不刷新的话，运行中导入的账户
+        要重启才能生效。mtime 比对很便宜，每次请求前做一次即可。
+        """
+        m = self._stat()
+        if m == self._mtime:
+            return False
+        self._mtime = m
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(data, dict):
+            return False
+        self._raw = data
+        listen = data.get("listen", {})
+        upstream = data.get("upstream", {})
+        self.host = listen.get("host", self.host)
+        self.port = int(listen.get("port", self.port))
+        self.base_url = upstream.get("base", self.base_url).rstrip("/")
+        self.accounts = data.get("accounts", [])
+        self.active_label = data.get("active", "")
+        return True
+
     # -- 校验 ---------------------------------------------------------------
 
     def problems(self) -> list[str]:
+        """阻塞性错误。账户为空**不算错误** —— 没有账户时服务照常启动，
+        只是 /v1/* 会返回 503，可用 --import_ 导入后再切账户。"""
         errs: list[str] = []
         if not self.base_url:
             errs.append('缺少 upstream.base')
@@ -86,8 +121,6 @@ class Config:
             errs.append(f"upstream.base 必须以 http:// 或 https:// 开头：{self.base_url}")
         if self.port <= 0 or self.port > 65535:
             errs.append(f"listen.port 非法：{self.port}")
-        if not self.accounts:
-            errs.append("accounts 为空")
         for i, a in enumerate(self.accounts):
             if not a.get("uuid"):
                 errs.append(f"accounts[{i}] ({a.get('label', '?')}) 缺少 uuid")
@@ -97,6 +130,17 @@ class Config:
             if not any(a.get("label") == self.active_label for a in self.accounts):
                 errs.append(f"active 指向不存在的账户：{self.active_label!r}")
         return errs
+
+    def warnings(self) -> list[str]:
+        """非阻塞提醒。"""
+        warn: list[str] = []
+        if not self.accounts:
+            warn.append(
+                "accounts 为空：服务可以启动，但 /v1/* 会返回 503。"
+                "用 `python mtbridge_tui.py --import_ <文件>` 导入账户列表，"
+                "或直接编辑 config.json。"
+            )
+        return warn
 
     @property
     def chat_url(self) -> str:
@@ -113,6 +157,7 @@ class Config:
         return None
 
     def active_account(self) -> dict | None:
+        self.refresh_if_changed()
         if self.active_label:
             hit = self.account_by_label(self.active_label)
             if hit:
@@ -133,6 +178,7 @@ class Config:
         self._raw["accounts"] = self.accounts
         self._raw["active"] = self.active_label
         _write_json(self.path, self._raw)
+        self._mtime = self._stat()
 
     def export_json(self) -> str:
         """账户列表导出（不含任何服务端凭据，仅 uuid/clientId/备注）。"""
@@ -183,6 +229,10 @@ class Config:
                 "enabled": item.get("enabled", True),
             })
             added += 1
+        if not self.active_label and self.accounts:
+            # 导入后没有指定 active，自动选第一个，否则看起来像「导入了
+            # 但服务仍然认不出账户」
+            self.active_label = self.accounts[0].get("label", "")
         self.save()
         return added, skipped
 
@@ -193,17 +243,46 @@ def _write_json(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
+#: config.json 不存在时自动生成的骨架。所有地址/端口都有可用的默认值，
+#: 账户留空 —— 有账户时才能发请求。
+CONFIG_TEMPLATE: dict = {
+    "listen": {"host": "127.0.0.1", "port": 8787},
+    "upstream": {"base": "https://monitor.mini-tavern.com"},
+    "request_timeout_seconds": 300,
+    "model_cache_ttl_seconds": 300,
+    "verify_tls": True,
+    "verbose": False,
+    "active": "",
+    "accounts": [],
+}
+
+
+def ensure_config(path: Path) -> bool:
+    """没有配置文件就生成一个空骨架。返回是否新建了。"""
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(path, CONFIG_TEMPLATE)
+    return True
+
+
 def load_config(path: Path) -> Config:
     if not path.exists():
-        die(f"找不到配置文件：{path}\n"
-            f"复制 config.example.json 为 config.json 并填入你的账户信息。")
+        ensure_config(path)
+        print(f"已生成空配置：{path}")
+        print("填入 uuid 即可使用，或用 --import_ 导入账户列表。\n")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         die(f"配置文件 JSON 解析失败：{e}")
     if not isinstance(data, dict):
         die("配置文件根节点必须是对象")
-    return Config(path, data)
+    cfg = Config(path, data)
+    if not path.exists() or not data.get("upstream"):
+        # 自动生成的骨架没有自定义上游，补上默认值再落盘
+        data.setdefault("upstream", CONFIG_TEMPLATE["upstream"])
+        _write_json(path, data)
+    return cfg
 
 
 # ------------------------------------------------------------------ 日志
@@ -842,24 +921,33 @@ def self_test(cfg: Config) -> int:
     errs = cfg.problems()
     for e in errs:
         print(f"  ✗ {e}")
-    if not errs:
-        print(f"  ✓ 配置合法：{len(cfg.accounts)} 个账户，活动 = {cfg.active_account().get('label')}")
-    else:
+    for w in cfg.warnings():
+        print(f"  ! {w}")
+    if errs:
         return 1
+    acc = cfg.active_account()
+    if acc:
+        print(f"  ✓ 配置合法：{len(cfg.accounts)} 个账户，活动 = {acc.get('label')}")
+    else:
+        print("  ✓ 配置合法：0 个账户（服务可启动，调用前需先导入或添加）")
 
     print("\n=== 网络自检 ===")
-    up = Upstream(cfg)
     acc = cfg.active_account()
-    err, models = up.models(acc["clientId"])
-    if models:
-        print(f"  ✓ 上游可达，{len(models)} 个模型")
-        for m in models[:5]:
-            print(f"      {m['id']:18} {m['name']}")
-        if len(models) > 5:
-            print(f"      ... 其余 {len(models) - 5} 个")
+    if acc is None:
+        print("  - 跳过：没有活动账户，无法鉴权。")
+        print("    先导入账户（--import_ <文件>）或编辑 config.json 再跑一次 --check。")
     else:
-        print(f"  ✗ 模型目录获取失败：{err}")
-        return 1
+        up = Upstream(cfg)
+        err, models = up.models(acc["clientId"])
+        if models:
+            print(f"  ✓ 上游可达，{len(models)} 个模型")
+            for m in models[:5]:
+                print(f"      {m['id']:18} {m['name']}")
+            if len(models) > 5:
+                print(f"      ... 其余 {len(models) - 5} 个")
+        else:
+            print(f"  ✗ 模型目录获取失败：{err}")
+            return 1
 
     print("\n=== 端口自检 ===")
     probe = socket.socket()

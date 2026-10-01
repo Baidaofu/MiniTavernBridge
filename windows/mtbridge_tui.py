@@ -152,8 +152,10 @@ def draw(t: Term, cfg: mtbridge.Config, proxy_port: int, state: dict, sel: int):
     # ---- 状态块
     t.write("\n\n  ")
     t.write("活动账户  ", fg=245)
-    t.write((active.get("label") if active else "无") or "无",
-            fg=79, bold=True)
+    if active:
+        t.write(active.get("label") or "无", fg=79, bold=True)
+    else:
+        t.write("无（先按 i 导入账户列表）", fg=203, bold=True)
     if active:
         q = state.get("quota", {}).get(active["uuid"])
         t.write("   ")
@@ -246,6 +248,8 @@ def run_tui(cfg_path: Path, port: int) -> int:
         for e in errs:
             print(f"配置错误：{e}", file=sys.stderr)
         return 2
+    for w in cfg.warnings():
+        print(f"提醒：{w}", file=sys.stderr)
 
     STATE = mtbridge.State()
     STATE.cfg = cfg
