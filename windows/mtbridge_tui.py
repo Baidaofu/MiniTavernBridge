@@ -106,9 +106,11 @@ class Term:
         if not self._k32.GetConsoleMode(self._h, ctypes.byref(self._mode)):
             self._tty = False
             return
-        # ENABLE_MOUSE_INPUT(4) | ENABLE_WINDOW_INPUT(8) | ENABLE_EXTENDED_FLAGS(128)
-        self._k32.SetConsoleMode(
-            self._h, self._mode.value | 0x0004 | 0x0008 | 0x0080)
+        # ENABLE_VIRTUAL_TERMINAL_INPUT(4)：把方向键/鼠标转成 ANSI 序列，
+        # 交给 getwch() 读。不要开 ENABLE_MOUSE_INPUT ——
+        # 那会让控制台把鼠标塞进 INPUT_RECORD，读取时会连带吃掉键盘事件
+        # （之前用 ReadConsoleInputW 轮询就是这个坑）。
+        self._k32.SetConsoleMode(self._h, self._mode.value | 0x0004)
 
     def _win_vt(self):
         """打开 stdout 的虚拟终端处理，否则所有 ANSI 序列（包括清行 \\x1b[K）
@@ -136,16 +138,14 @@ class Term:
     # -- 鼠标 -------------------------------------------------------------
 
     def _enable_mouse(self):
-        if IS_WIN:
-            self._mouse_on = self._tty          # 由 _win_setup 打开的标志位
-        else:
-            self.out.write("\x1b[?1000h\x1b[?1006h")
-            self.out.flush()
-            self._mouse_on = True
+        self.out.write("\x1b[?1000h\x1b[?1006h")
+        self.out.flush()
+        self._mouse_on = True
 
     def _disable_mouse(self):
-        if not IS_WIN and self._mouse_on:
+        if self._mouse_on:
             self.out.write("\x1b[?1006l\x1b[?1000l")
+            self.out.flush()
 
     # -- 尺寸 -------------------------------------------------------------
 
@@ -199,77 +199,55 @@ class Term:
             time.sleep(timeout)
             return None
         if IS_WIN:
-            return self._read_win(timeout)
+            import msvcrt
+
+            while msvcrt.kbhit():
+                ev = self._decode_seq(msvcrt.getwch())
+                if ev:
+                    return ev
+            time.sleep(timeout)
+            while msvcrt.kbhit():
+                ev = self._decode_seq(msvcrt.getwch())
+                if ev:
+                    return ev
+            return None
         return self._read_posix(timeout)
 
-    def _read_win(self, timeout):
-        import msvcrt
-
-        # 先清空已有按键
-        while msvcrt.kbhit():
-            k = msvcrt.getwch()
-            ev = self._decode_win_key(k)
-            if ev:
-                return ev
-        # 有鼠标事件就取
-        ev = self._poll_win_mouse()
-        if ev:
-            return ev
-        time.sleep(timeout)
-        ev = self._poll_win_mouse()
-        return ev
-
-    def _decode_win_key(self, k):
-        if k in ("\x00", "\xe0"):
-            if not msvcrt.kbhit():
-                return None
-            code = msvcrt.getwch()
-            return {
-                "H": ("key", "up"), "P": ("key", "down"),
-                "K": ("key", "left"), "M": ("key", "right"),
-                "G": ("key", "home"), "O": ("key", "end"),
-                "I": ("key", "pgup"), "Q": ("key", "pgdn"),
-            }.get(code)
-        return ("key", k)
-
-    def _poll_win_mouse(self):
-        """读 INPUT_RECORD 取滚轮/点击。"""
-        if self._h is None or not self._mouse_on:
-            return None
-        class MOUSE_EVENT_RECORD(ctypes.Structure):
-            _fields_ = [("dwMousePositionX", ctypes.c_long),
-                        ("dwMousePositionY", ctypes.c_long),
-                        ("dwButtonDown", ctypes.c_uint32),
-                        ("dwEventFlags", ctypes.c_uint32),
-                        ("dwEventTime", ctypes.c_uint32),
-                        ("dwMouseWheelData", ctypes.c_long)]
-        class INPUT_RECORD(ctypes.Union):
-            _fields_ = [("EventType", ctypes.c_uint16),
-                        ("ev", MOUSE_EVENT_RECORD),
-                        ("_pad", ctypes.c_byte * 24)]
-        rec = INPUT_RECORD()
-        n = ctypes.c_uint32(0)
-        got = self._k32.GetNumberOfConsoleInputEvents(self._h, ctypes.byref(n))
-        if not got or n.value == 0:
-            return None
-        for _ in range(n.value):
-            if not self._k32.ReadConsoleInputW(self._h, ctypes.byref(rec), 1, ctypes.byref(n)):
+    def _decode_seq(self, ch):
+        """把一个输入字符解成事件。非 ESC 时直接当按键。"""
+        if ch != "\x1b":
+            return ("key", ch)
+        seq = ""
+        while len(seq) < 24:
+            c = sys.stdin.read(1)
+            if not c:
                 break
-            if rec.EventType != 0:          # 0 = KEY_EVENT
-                continue
-            flags = rec.ev.dwEventFlags
-            if flags & 0x0004:              # MOUSE_WHEELED
-                delta = ctypes.c_short(rec.ev.dwMouseWheelData).value
-                return ("wheel", 1 if delta > 0 else -1)
-            if flags & 0x0002:              # MOUSE_EVENT
-                return ("click", self._row_at(rec.ev.dwMousePositionY))
-            n = ctypes.c_uint32(1)
-        return None
+            seq += c
+            if c.isalpha() or c == "~":
+                break
+        return self._classify(seq)
 
-    def _row_at(self, y):
-        w, h = self.size()
-        r = y * h // 25        # 近似：Windows 单元格高约 1/25 屏
-        return max(0, min(h - 1, r))
+    def _classify(self, seq):
+        """SGR 鼠标序列或方向键。"""
+        if seq.startswith("[<"):                    # \x1b[<btn;x;yM/m
+            parts = seq[2:].split(";")
+            if len(parts) >= 3 and parts[0] in ("A", "B"):
+                return ("wheel", 1 if parts[0] == "A" else -1)
+            if len(parts) >= 3 and parts[0] in ("M", "m"):
+                try:
+                    return ("click", self._row_from_sgr(int(parts[1])))
+                except ValueError:
+                    return None
+            return None
+        return {
+            "[A": ("key", "up"), "[B": ("key", "down"),
+            "[C": ("key", "right"), "[D": ("key", "left"),
+            "[5": ("key", "pgup"), "[6": ("key", "pgdn"),
+            "[H": ("key", "home"), "[F": ("key", "end"),
+            "OA": ("key", "up"), "OB": ("key", "down"),
+            "OC": ("key", "right"), "OD": ("key", "left"),
+            "[3~": ("key", "delete"),
+        }.get(seq)
 
     def _read_posix(self, timeout):
         import select
@@ -277,24 +255,7 @@ class Term:
         r, _, _ = select.select([sys.stdin], [], [], timeout)
         if not r:
             return None
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":                       # 可能��转义序列
-            seq = ""
-            while len(seq) < 12:
-                seq += sys.stdin.read(1)
-                if seq[-1:].isalpha() or seq[-1:] == "~":
-                    break
-            if seq.startswith("[<"):
-                m = seq.split(";")
-                if len(m) >= 3 and m[0] in ("A", "B"):
-                    return ("wheel", -1 if m[0] == "A" else 1)
-                if len(m) >= 3 and m[0] in ("M", "m"):
-                    return ("click", self._row_from_sgr(int(m[1])))
-            return {"[A": ("key", "up"), "[B": ("key", "down"),
-                    "[C": ("key", "right"), "[D": ("key", "left"),
-                    "[5": ("key", "pgup"), "[6": ("key", "pgdn"),
-                    "[H": ("key", "home"), "[F": ("key", "end")}.get(seq)
-        return ("key", ch)
+        return self._decode_seq(sys.stdin.read(1))
 
     def _row_from_sgr(self, y):
         w, h = self.size()
@@ -360,7 +321,7 @@ def draw(cfg, port: int, st: dict, sel: int) -> list[str]:
     rows = max(3, h - len(out) - 6)
     out.append("")
     out.append("  " + paint("账户", "white", "bold")
-               + paint("   ↑↓ / j k / 滚轮 选择 · Enter 切换 · e 停用 · d 删除 · R 刷新 · t×5 调试 · q 退出",
+               + paint("   ↑↓ / j k / 滚轮 选择 · Enter 切换 · e 停用 · d 删除 · R 刷新 · q 退出",
                        "grey"))
     if not accounts:
         out.append("    " + paint("（空）按 i 或运行 --import_ 导入账户列表；也可直接编辑 config.json",
