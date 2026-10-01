@@ -78,6 +78,7 @@ class Term:
             self._old_attrs = termios.tcgetattr(sys.stdin.fileno())
             tty.setcbreak(sys.stdin.fileno())
         self.out.write("\x1b[?1049h\x1b[?25l")   # 备用屏 + 隐藏光标
+        self.out.flush()
         self._enable_mouse()
         self._prev = []
         return self
@@ -98,6 +99,7 @@ class Term:
     def _win_setup(self):
         if not self._tty:
             return
+        self._win_vt()
         self._k32 = ctypes.windll.kernel32
         self._h = self._k32.GetStdHandle(-10)          # STD_INPUT_HANDLE
         self._mode = ctypes.c_uint32()
@@ -108,9 +110,24 @@ class Term:
         self._k32.SetConsoleMode(
             self._h, self._mode.value | 0x0004 | 0x0008 | 0x0080)
 
+    def __win_vt(self):
+        """打开 stdout 的虚拟终端处理，否则所有 ANSI 序列（包括清行 \\x1b[K）
+        都不会被解释，而是被当普通字符打印，或干脆静默失效导致残影。"""
+        k32 = ctypes.windll.kernel32
+        h = k32.GetStdHandle(-11)               # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not k32.GetConsoleMode(h, ctypes.byref(mode)):
+            return
+        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        k32.SetConsoleMode(h, mode.value | 0x0004)
+        self._out_handle, self._out_mode = h, mode.value
+
     def _win_restore(self):
-        if self._h is not None and self._k32 is not None:
+        if self._k32 is not None and self._h is not None:
             self._k32.SetConsoleMode(self._h, self._mode.value)
+        if getattr(self, "_out_handle", None) is not None:
+            ctypes.windll.kernel32.SetConsoleMode(
+                self._out_handle, self._out_mode)
 
     # -- 鼠标 -------------------------------------------------------------
 
@@ -288,7 +305,7 @@ def short_model(m: str) -> str:
 
 def draw(cfg, port: int, st: dict, sel: int) -> list[str]:
     """返回整屏的行；Term.render 会做差分，只重画变化的部分。"""
-    w, h = Term.size.__wrapped__(None) if False else shutil.get_terminal_size()
+    w, h = shutil.get_terminal_size()
     w = max(60, w)
     h = max(16, h)
     accounts = cfg.accounts
@@ -297,15 +314,16 @@ def draw(cfg, port: int, st: dict, sel: int) -> list[str]:
     active = cfg.active_account()
     out: list[str] = []
 
-    # 顶栏
-    right = f"http://127.0.0.1:{port}/v1"
-    head = "  MiniTavern Bridge TUI" + paint(f"  v{mtbridge.__version__}", "grey")
-    gap = max(1, w - len(_plain(head)) - len(_plain(right)) - 6)
-    out.append(head + " " * gap + paint(right, "grey"))
+    # 顶栏：标题一行，连接地址单独一行。
+    # 原来把地址右对齐在标题行，窄终端下会把整行截断成 "htt"。
+    url = f"http://127.0.0.1:{port}/v1"
     st_txt = f"{'● 运行中' if st['running'] else '○ 已停止'}"
-    out.append("  " + paint(st_txt, "green" if st["running"] else "red", "bold")
+    out.append("  " + paint("MiniTavern Bridge TUI", "white", "bold")
+               + paint(f"  v{mtbridge.__version__}   ", "grey")
+               + paint(st_txt, "green" if st["running"] else "red", "bold")
                + paint(f"   账户 {len(accounts)}   模型 {st['model_count'] or '—'}"
                        f"   请求 {st['requests']}", "grey"))
+    out.append("  " + paint(url, "teal"))
 
     # 活动账户
     if active:
@@ -460,9 +478,9 @@ def run_tui(cfg_path: Path, port: int) -> int:
             if models:
                 st["model_count"] = len(models)
             probe = models[0]["name"] if models else "deepseek/deepseek-v3.2-exp"
-            r = mtbridge.Upstream(cfg).probeQuota(acc["uuid"], acc["clientId"], probe)
-            if r.is_ok:
-                st["quota"][acc["uuid"]] = r.value
+            q = mtbridge.Upstream(cfg).probe_quota(acc, probe)
+            if q:
+                st["quota"][acc["uuid"]] = q
     threading.Thread(target=bg, daemon=True).start()
 
     sel = 0

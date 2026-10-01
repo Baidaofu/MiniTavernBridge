@@ -384,6 +384,26 @@ class Upstream:
         ctype = (resp.headers.get_content_type() or "").lower()
         return resp.status, ctype, resp
 
+    def probe_quota(self, account: dict, model: str) -> dict | None:
+        """发一次最小的非流式请求，从 otherInfo 读回配额。
+
+        后端没有独立的配额查询接口，配额只能从任意一次对话响应里拿，
+        所以这是一次**真实调用**，会消耗账户配额。
+        """
+        payload = {
+            "model": model,
+            "stream": False,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        try:
+            _, _, resp = self.open_chat(account, payload)
+            with resp:
+                text = resp.read().decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            return None
+        return parse_quota(text)
+
 
 # ------------------------------------------------------------------ 服务
 
