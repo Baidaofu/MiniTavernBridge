@@ -2,23 +2,20 @@
 """
 mtbridge-tui — mtbridge 的终端界面。
 
-零第三方依赖（标准库 + ANSI / Win32 console API）。
+设计参照 GLM-Free-API 的 token-collector（bubbletea + lipgloss）那套做法，
+翻译成 Python 标准库实现，零第三方依赖：
 
-修复记录
---------
-1. 「连接不到服务」：run_tui 里写的是局部变量 ``STATE = mtbridge.State()``，
-   把模块级的 ``mtbridge.STATE`` 遮住了，Handler 拿到的仍是 None，
-   断言失败后所有 /v1/* 返回 503。必须写 ``mtbridge.STATE``。
-2. 频闪：原来每 0.15s 整屏 ``\\x1b[2J`` 清屏再重画。改为差分渲染 ——
-   逐行定位 + 只重画变化的行，没有变化就不发任何转义序列。
-3. 选择项不稳定 / 鼠标无效：原来只读键盘，且每个事件都无条件重绘。
-   现在加 Windows 原生鼠标（读 INPUT_RECORD，识别滚轮与点击）与
-   Unix 的 SGR 鼠标序列，选中项在重绘之间保持。
+1. 状态集中在一个 dict，网络 I/O 全部丢进后台线程；
+   **事件循环里绝不做阻塞调用** —— 之前 R 键刷新和 t 键开户都是直接
+   在循环里发网络请求，界面整个冻住，实测要等十几秒才有反应。
+2. 渲染由 ticker 驱动（约 5 fps），事件循环只负责收键。
+3. 整帧渲染，但**内容没变就一个字节都不写**，避免闪烁。
+   （之前做的是逐行差分，逻辑一复杂就会和光标位置失步，表现为残影）
+4. 底部固定日志面板，可滚动。
 
-运行
-----
-    python mtbridge_tui.py                 # 前台运行代理 + TUI
-    python mtbridge_tui.py --headless      # 只跑代理，不开界面
+运行：
+    python mtbridge_tui.py
+    python mtbridge_tui.py --headless
 """
 
 from __future__ import annotations
@@ -27,342 +24,536 @@ import argparse
 import ctypes
 import json
 import os
+import queue
 import shutil
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mtbridge  # noqa: E402
 
 IS_WIN = sys.platform == "win32"
+TICK = 0.2                      # 渲染间隔
+LOG_MAX = 400
 
-# ANSI 颜色
-C = {
-    "reset": "\x1b[0m", "dim": "\x1b[2m", "bold": "\x1b[1m",
-    "teal": "\x1b[38;5;79m", "green": "\x1b[38;5;114m",
-    "yellow": "\x1b[38;5;221m", "red": "\x1b[38;5;203m",
-    "grey": "\x1b[38;5;245m", "white": "\x1b[38;5;255m",
-    "bg": "\x1b[48;5;236m", "rvs": "\x1b[7m",
-}
+# ---------------------------------------------------------------- 颜色
+
+A = "\x1b["
 
 
-def paint(s: str, *styles: str) -> str:
-    return "".join(C[x] for x in styles if x in C) + s + C["reset"]
+def c(text, *styles):
+    return f"{A}{';'.join(styles)}m{text}{A}0m" if styles else text
 
 
-# ------------------------------------------------------------------ 终端
+BOLD = "1"
+DIM = "2"
+TEAL = "38;5;79"
+GREEN = "38;5;114"
+YELLOW = "38;5;221m"[0:-1]
+RED = "38;5;203"
+GREY = "38;5;245"
+DIMGREY = "38;5;240"
+WHITE = "38;5;255"
+BGV = "48;5;236"
+CYAN = "38;5;99"
+
+
+def vis(s: str) -> str:
+    """去掉 ANSI 的可见宽度。"""
+    import re
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+
+def cut(s: str, w: int) -> str:
+    """按可见宽度截断（不处理宽字符，够用）。"""
+    if len(vis(s)) <= w:
+        return s
+    out, n = [], 0
+    i = 0
+    while i < len(s):
+        if s[i] == "\x1b":
+            j = s.find("m", i)
+            if j < 0:
+                break
+            out.append(s[i:j + 1])
+            i = j + 1
+            continue
+        if n >= w:
+            break
+        out.append(s[i])
+        n += 1
+        i += 1
+    return "".join(out)
+
+
+# ---------------------------------------------------------------- 状态
+
+
+class S:
+    """全局状态。所有字段由后台线程写、渲染线程读。"""
+
+    def __init__(self, cfg, port):
+        self.lock = threading.Lock()
+        self.cfg = cfg
+        self.port = port
+        self.running = True
+        self.sel = 0
+        self.model_count = 0
+        self.requests = 0
+        self.quota: dict[str, dict] = {}
+        self.recent: deque = deque(maxlen=6)
+        self.msg = ""
+        self.logs: deque = deque(maxlen=LOG_MAX)
+        self.log_off = 0
+        self.busy = ""            # 正在做的事，显示在状态行
+        self.dirty = True
+
+    def log(self, msg, kind="info"):
+        ts = time.strftime("%H:%M:%S")
+        with self.lock:
+            self.logs.append(f"{ts}  {msg}")
+        self.dirty = True
+
+    def set(self, **kw):
+        with self.lock:
+            for k, v in kw.items():
+                setattr(self, k, v)
+        self.dirty = True
+
+    def accounts(self):
+        return self.cfg.accounts
+
+    def active(self):
+        return self.cfg.active_account()
+
+
+# ---------------------------------------------------------------- 终端
+
 
 class Term:
-    """原始模式 + 备用屏 + 差分重绘。"""
-
-    def __init__(self) -> None:
+    def __init__(self):
         self.out = sys.stdout
-        self._prev: list[str] = []
-        self._tty = sys.stdin.isatty() and sys.stdout.isatty()
-        self._old_attrs = None
-        self._h = None
-        self._k32 = None
-        self._mouse_on = False
-
-    # -- 生命周期 ---------------------------------------------------------
+        self.tty = sys.stdin.isatty() and sys.stdout.isatty()
+        self._prev_frame = None
+        self._k32 = self._h = self._mode = None
+        self._oh = self._om = None
+        self._old = None
 
     def __enter__(self):
         if IS_WIN:
-            self._win_setup()
+            self._win()
         else:
             import termios
             import tty
 
-            self._old_attrs = termios.tcgetattr(sys.stdin.fileno())
+            self._old = termios.tcgetattr(sys.stdin.fileno())
             tty.setcbreak(sys.stdin.fileno())
-        self.out.write("\x1b[?1049h\x1b[?25l")   # 备用屏 + 隐藏光标
+        self.out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
         self.out.flush()
-        self._enable_mouse()
-        self._prev = []
+        self._prev_frame = None
         return self
 
-    def __exit__(self, *exc):
-        self._disable_mouse()
-        self.out.write("\x1b[?25h\x1b[0m\x1b[?1049l")
+    def __exit__(self, *e):
+        self.out.write("\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[0m\x1b[?1049l")
         self.out.flush()
         if IS_WIN:
-            self._win_restore()
+            if self._k32 and self._h is not None:
+                self._k32.SetConsoleMode(self._h, self._mode)
+            if self._oh is not None:
+                ctypes.windll.kernel32.SetConsoleMode(self._oh, self._om)
         else:
             import termios
 
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old_attrs)
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old)
 
-    # -- Windows ----------------------------------------------------------
-
-    def _win_setup(self):
-        if not self._tty:
-            return
-        self._win_vt()
-        self._k32 = ctypes.windll.kernel32
-        self._h = self._k32.GetStdHandle(-10)          # STD_INPUT_HANDLE
-        self._mode = ctypes.c_uint32()
-        if not self._k32.GetConsoleMode(self._h, ctypes.byref(self._mode)):
-            self._tty = False
-            return
-        # ENABLE_VIRTUAL_TERMINAL_INPUT(4)：把方向键/鼠标转成 ANSI 序列，
-        # 交给 getwch() 读。不要开 ENABLE_MOUSE_INPUT ——
-        # 那会让控制台把鼠标塞进 INPUT_RECORD，读取时会连带吃掉键盘事件
-        # （之前用 ReadConsoleInputW 轮询就是这个坑）。
-        self._k32.SetConsoleMode(self._h, self._mode.value | 0x0004)
-
-    def _win_vt(self):
-        """打开 stdout 的虚拟终端处理，否则所有 ANSI 序列（包括清行 \\x1b[K）
-        都不会被解释，而是被当普通字符打印，或干脆静默失效导致残影。"""
+    def _win(self):
         k32 = ctypes.windll.kernel32
-        h = k32.GetStdHandle(-11)               # STD_OUTPUT_HANDLE
-        mode = ctypes.c_uint32()
-        if not k32.GetConsoleMode(h, ctypes.byref(mode)):
+        # stdout: 打开 VT 输出，否则 \x1b[K 不清行，会留残影
+        oh = k32.GetStdHandle(-11)
+        om = ctypes.c_uint32()
+        if k32.GetConsoleMode(oh, ctypes.byref(om)):
+            k32.SetConsoleMode(oh, om.value | 0x0004)
+            self._oh, self._om = oh, om.value
+        # stdin: 打开 VT 输入，方向键/鼠标都转成 ANSI 序列
+        h = k32.GetStdHandle(-10)
+        m = ctypes.c_uint32()
+        if not k32.GetConsoleMode(h, ctypes.byref(m)):
+            self.tty = False
             return
-        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-        k32.SetConsoleMode(h, mode.value | 0x0004)
-        self._out_handle, self._out_mode = h, mode.value
-
-    def _win_restore(self):
-        # 用 getattr：_win_setup 在非交互环境下会提前 return，
-        # 那些属性根本不存在，直接访问会在退出时抛 AttributeError。
-        k32 = getattr(self, "_k32", None)
-        h = getattr(self, "_h", None)
-        if k32 is not None and h is not None:
-            k32.SetConsoleMode(h, self._mode.value)
-        oh = getattr(self, "_out_handle", None)
-        if oh is not None:
-            ctypes.windll.kernel32.SetConsoleMode(oh, self._out_mode)
-
-    # -- 鼠标 -------------------------------------------------------------
-
-    def _enable_mouse(self):
-        self.out.write("\x1b[?1000h\x1b[?1006h")
-        self.out.flush()
-        self._mouse_on = True
-
-    def _disable_mouse(self):
-        if self._mouse_on:
-            self.out.write("\x1b[?1006l\x1b[?1000l")
-            self.out.flush()
-
-    # -- 尺寸 -------------------------------------------------------------
+        k32.SetConsoleMode(h, m.value | 0x0004)   # ENABLE_VIRTUAL_TERMINAL_INPUT
+        self._k32, self._h, self._mode = k32, h, m.value
 
     def size(self):
         try:
             s = shutil.get_terminal_size()
-            return max(60, s.columns), max(16, s.lines)
+            return max(60, s.columns), max(18, s.lines)
         except Exception:
             return 100, 30
 
-    # -- 差分绘制 ---------------------------------------------------------
-
-    def render(self, lines: list[str]) -> bool:
-        """只重画变化的行。返回是否真的写了东西。"""
+    def draw(self, lines: list[str]) -> bool:
         w, h = self.size()
-        buf = [ln[: w - 1] for ln in lines[: h - 1]]
-        if buf == self._prev:
+        frame = [cut(x, w - 1) for x in lines[: h - 1]]
+        if frame == self._prev_frame:
             return False
-        out = []
-        # 从上往下逐行比；整段相同则跳过（run-length，最省）
-        i = 0
-        while i < len(buf):
-            if i < len(self._prev) and buf[i] == self._prev[i]:
-                i += 1
-                continue
-            j = i
-            while (j < len(buf) and j < len(self._prev) and buf[j] == self._prev[j]):
-                j += 1
-            # i..j 有变化，整块输出
-            for k in range(i, len(buf)):
-                out.append(f"\x1b[{k + 1};1H\x1b[K{buf[k]}")
-            # 补齐上次多出来的行
-            for k in range(len(buf), len(self._prev)):
-                out.append(f"\x1b[{k + 1};1H\x1b[K")
-            break
-        else:
-            for k in range(len(self._prev), len(buf)):
-                out.append(f"\x1b[{k + 1};1H\x1b[K{buf[k]}")
-        if not out:
-            return False
+        out = ["\x1b[H"]
+        for ln in frame:
+            out.append("\x1b[K" + ln + "\n")
+        # 多余的行清掉
+        for _ in range(max(0, len(self._prev_frame or []) - len(frame))):
+            out.append("\x1b[K\n")
         self.out.write("".join(out))
         self.out.flush()
-        self._prev = buf
+        self._prev_frame = frame
         return True
 
-    # -- 输入 -------------------------------------------------------------
-
-    def read_event(self, timeout: float = 0.25):
-        """返回 ('key', ch) / ('wheel', +1|-1) / ('click', row) / None。"""
-        if not self._tty:
+    def key(self, timeout: float) -> str | None:
+        """阻塞等一个按键，返回键值；ESC 开头的返回 ''。超时返回 None。"""
+        if not self.tty:
             time.sleep(timeout)
             return None
         if IS_WIN:
             import msvcrt
 
-            while msvcrt.kbhit():
-                ev = self._decode_seq(msvcrt.getwch())
-                if ev:
-                    return ev
-            time.sleep(timeout)
-            while msvcrt.kbhit():
-                ev = self._decode_seq(msvcrt.getwch())
-                if ev:
-                    return ev
-            return None
-        return self._read_posix(timeout)
-
-    def _decode_seq(self, ch):
-        """把一个输入字符解成事件。非 ESC 时直接当按键。"""
-        if ch != "\x1b":
-            return ("key", ch)
-        seq = ""
-        while len(seq) < 24:
-            c = sys.stdin.read(1)
-            if not c:
-                break
-            seq += c
-            if c.isalpha() or c == "~":
-                break
-        return self._classify(seq)
-
-    def _classify(self, seq):
-        """SGR 鼠标序列或方向键。"""
-        if seq.startswith("[<"):                    # \x1b[<btn;x;yM/m
-            parts = seq[2:].split(";")
-            if len(parts) >= 3 and parts[0] in ("A", "B"):
-                return ("wheel", 1 if parts[0] == "A" else -1)
-            if len(parts) >= 3 and parts[0] in ("M", "m"):
-                try:
-                    return ("click", self._row_from_sgr(int(parts[1])))
-                except ValueError:
-                    return None
-            return None
-        return {
-            "[A": ("key", "up"), "[B": ("key", "down"),
-            "[C": ("key", "right"), "[D": ("key", "left"),
-            "[5": ("key", "pgup"), "[6": ("key", "pgdn"),
-            "[H": ("key", "home"), "[F": ("key", "end"),
-            "OA": ("key", "up"), "OB": ("key", "down"),
-            "OC": ("key", "right"), "OD": ("key", "left"),
-            "[3~": ("key", "delete"),
-        }.get(seq)
-
-    def _read_posix(self, timeout):
+            while True:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch != "\x1b":
+                        return ch
+                    return self._seq()       # 方向键/鼠标，事件循环另行忽略
+                time.sleep(timeout)
+                if msvcrt.kbhit():
+                    continue
+                return None
         import select
 
         r, _, _ = select.select([sys.stdin], [], [], timeout)
         if not r:
             return None
-        return self._decode_seq(sys.stdin.read(1))
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            return self._seq()
+        return ch
 
-    def _row_from_sgr(self, y):
-        w, h = self.size()
-        return max(0, min(h - 1, (y - 1) * h // 25))
+    def _seq(self):
+        """读完一个 ESC 序列，翻译成事件；不是鼠标/方向键则返回空串。"""
+        seq = ""
+        for _ in range(24):
+            ch = sys.stdin.read(1)
+            if not ch:
+                break
+            seq += ch
+            if ch.isalpha() or ch == "~":
+                break
+        if seq.startswith("[<"):
+            p = seq[2:].split(";")
+            if len(p) >= 3:
+                if p[0] in ("A", "B"):
+                    return "\x01up" if p[0] == "A" else "\x01down"
+                if p[0] in ("M", "m"):
+                    return "\x02click"
+            return ""
+        return {
+            "[A": "up", "[B": "down", "[C": "right", "[D": "left",
+            "OA": "up", "OB": "down", "OC": "right", "OD": "left",
+            "[5": "pgup", "[6": "pgdn",
+        }.get(seq, "")
 
 
-# ------------------------------------------------------------------ 面板
-
-def short_model(m: str) -> str:
-    return m.rsplit("/", 1)[-1]
+# ---------------------------------------------------------------- 渲染
 
 
-def draw(cfg, port: int, st: dict, sel: int) -> list[str]:
-    """返回整屏的行；Term.render 会做差分，只重画变化的部分。"""
-    w, h = shutil.get_terminal_size()
-    w = max(60, w)
-    h = max(16, h)
-    accounts = cfg.accounts
-    if accounts:
-        sel = max(0, min(sel, len(accounts) - 1))
-    active = cfg.active_account()
-    out: list[str] = []
+def render(st: S) -> list[str]:
+    w = max(60, shutil.get_terminal_size().columns)
+    h = max(18, shutil.get_terminal_size().lines)
+    accs = st.accounts()
+    sel = max(0, min(st.sel, len(accs) - 1)) if accs else 0
+    act = st.active()
+    out = []
 
-    # 顶栏：标题一行，连接地址单独一行。
-    # 原来把地址右对齐在标题行，窄终端下会把整行截断成 "htt"。
-    url = f"http://127.0.0.1:{port}/v1"
-    st_txt = f"{'● 运行中' if st['running'] else '○ 已停止'}"
-    out.append("  " + paint("MiniTavern Bridge TUI", "white", "bold")
-               + paint(f"  v{mtbridge.__version__}   ", "grey")
-               + paint(st_txt, "green" if st["running"] else "red", "bold")
-               + paint(f"   账户 {len(accounts)}   模型 {st['model_count'] or '—'}"
-                       f"   请求 {st['requests']}", "grey"))
-    out.append("  " + paint(url, "teal"))
-
-    # 活动账户
-    if active:
-        acc_line = paint(active.get("label", "?"), "teal", "bold")
-        q = st["quota"].get(active["uuid"])
+    # ---- 顶栏
+    out.append("  " + c("MiniTavern Bridge", WHITE, BOLD)
+               + c("  " + c(f"v{mtbridge.__version__}", GREY), GREY)
+               + ("  " + c("● 运行中", GREEN, BOLD) if st.running
+                  else "  " + c("○ 已停止", RED, BOLD)))
+    out.append("  " + c(f"http://127.0.0.1:{st.port}/v1", TEAL))
+    out.append("  " + c(f"账户 {len(accs)}   模型 {st.model_count or '—'}   "
+                          f"请求 {st.requests}", GREY))
+    if act:
+        line = "  活动  " + c(act.get("label", "?"), TEAL, BOLD)
+        q = st.quota.get(act["uuid"])
         if q:
-            acc_line += paint(f"   配额 {q['used']}/{q['total']}",
-                              "yellow" if q["used"] < q["total"] else "red")
+            line += c(f"   配额 {q['used']}/{q['total']}",
+                      YELLOW if q["used"] < q["total"] else RED)
+        out.append(line)
     else:
-        acc_line = paint("无 —— 还没有账户", "red", "bold")
-    out.append("  " + acc_line)
-    if st.get("msg"):
-        out.append("  " + paint(st["msg"][: w - 4], "yellow"))
-
-    # 最近调用
+        out.append("  活动  " + c("无 —— 还没有账户", RED, BOLD))
+    if st.busy:
+        out.append("  " + c("… " + st.busy, YELLOW))
+    elif st.msg:
+        out.append("  " + c(st.msg, YELLOW))
     out.append("")
-    out.append("  " + paint("最近调用", "white", "bold"))
-    calls = st.get("recent", [])
-    if not calls:
-        out.append("    " + paint("暂无", "grey"))
-    for c in reversed(calls[-5:]):
-        col = ("red" if c.get("error") else
-               "teal" if (c.get("status") or 0) < 300 else "yellow")
-        out.append(f"    {paint(c.get('time',''), 'grey')}  "
-                   f"{paint(f'{short_model(c.get(chr(109)+chr(111)+chr(100)+chr(101)+chr(108),'')):<26}', col)}"
-                   f"{c.get('latency_ms',0):>6} ms  "
-                   f"{paint('HTTP ' + str(c.get('status','-')), col)}")
 
-    # 账户表
-    rows = max(3, h - len(out) - 6)
+    # ---- 最近调用
+    out.append("  " + c("最近调用", WHITE, BOLD))
+    if not st.recent:
+        out.append("    " + c("暂无", DIMGREY))
+    for r in reversed(list(st.recent)):
+        col = RED if r.get("err") else (TEAL if (r.get("status") or 0) < 300 else YELLOW)
+        out.append("    " + c(r.get("t", ""), GREY) + "  "
+                   + c(f"{r.get('model','?').rsplit('/',1)[-1]:<24}", col)
+                   + c(f"{r.get('ms',0):>6}ms ", GREY)
+                   + c(f"HTTP {r.get('status','-')}", col)
+                   + (c("  " + r["err"], RED) if r.get("err") else ""))
     out.append("")
-    out.append("  " + paint("账户", "white", "bold")
-               + paint("   ↑↓ / j k / 滚轮 选择 · Enter 切换 · e 停用 · d 删除 · R 刷新 · q 退出",
-                       "grey"))
-    if not accounts:
-        out.append("    " + paint("（空）按 i 或运行 --import_ 导入账户列表；也可直接编辑 config.json",
-                                  "grey"))
-    for i, a in enumerate(accounts[:rows]):
-        on = a.get("uuid") == (active or {}).get("uuid")
-        mark = paint("▶", "teal", "bold") if on else "  "
-        label = f"{a.get('label','?'):<16} {a.get('uuid','')[:16]}…"
-        extra = ""
+
+    # ---- 账户表（分掉日志区之后剩下的高度）
+    log_h = max(3, min(12, h // 3))
+    acct_h = max(1, h - len(out) - log_h - 3)
+    out.append("  " + c("账户", WHITE, BOLD)
+               + c("   ↑↓ / j k / 滚轮 选择 · Enter 切换 · e 停用 · d 删除 · R 刷新 · q 退出",
+                   GREY))
+    if not accs:
+        out.append("    " + c("（空）编辑 config.json 或用 --import_ 导入", DIMGREY))
+    for i, a in enumerate(accs[:acct_h]):
+        on = a["uuid"] == (act or {}).get("uuid")
+        mark = c("▶", TEAL, BOLD) if on else " "
+        body = (f"{mark} {a.get('label','?'):<14} {a.get('uuid','')[:16]}…")
+        tail = ""
         if not a.get("enabled", True):
-            extra = paint("  [停用]", "red")
-        q = st["quota"].get(a["uuid"])
+            tail += c("  [停用]", RED)
+        q = st.quota.get(a["uuid"])
         if q:
-            extra += paint(f"   {q['used']}/{q['total']}", "grey")
-        line = f"  {mark} {label}{extra}"
-        if i == sel:
-            out.append(paint(line.ljust(w - 1)[: w - 1], "bg", "white", "bold"))
-        else:
-            out.append(paint(line, "teal") if on else paint(line, "grey"))
+            tail += c(f"  {q['used']}/{q['total']}", GREY)
+        line = "  " + body + tail
+        out.append(c(line.ljust(w - 1), BGV, WHITE, BOLD) if i == sel
+                   else (c(line, TEAL) if on else c(line, GREY)))
+
+    # ---- 日志面板
+    out.append("  " + c("─" * (w - 4), DIMGREY))
+    out.append("  " + c("日志", WHITE, BOLD)
+               + c("   g/G 跳到最新/最早 · ↑↓ 滚动", GREY))
+    with st.lock:
+        logs = list(st.logs)
+    view = log_h
+    end = len(logs) - st.log_off
+    start = max(0, end - view)
+    seg = logs[start:end]
+    while len(seg) < view:
+        seg.insert(0, "")
+    for ln in seg:
+        out.append(c(cut("  " + ln, w - 2), DIMGREY) if ln else "")
     return out
 
 
-def _plain(s: str) -> str:
-    import re
-    return re.sub(r"\x1b\[[0-9;]*m", "", s)
+# ---------------------------------------------------------------- 后台
 
 
-# ------------------------------------------------------------------ 账户操作
+def workers(st: S, httpd):
+    """所有网络 I/O 都在这里，主循环不碰。"""
+    cfg = st.cfg
 
-def do_export(cfg_path: Path, out: str) -> str:
+    def refresh_quota(acc):
+        up = mtbridge.Upstream(cfg)
+        _, models = up.models(acc["clientId"])
+        if models:
+            st.set(model_count=len(models))
+        q = up.probe_quota(acc, models[0]["name"] if models
+                           else "deepseek/deepseek-v3.2-exp")
+        if q:
+            with st.lock:
+                st.quota[acc["uuid"]] = q
+        return len(models)
+
+    def periodic():
+        while st.running:
+            time.sleep(12)
+            acc = st.active()
+            if not acc:
+                continue
+            try:
+                refresh_quota(acc)
+                st.dirty = True
+            except Exception as e:  # noqa: BLE001
+                st.log(f"刷新配额失败：{e}", "err")
+
+    threading.Thread(target=periodic, daemon=True).start()
+
+    # 记录调用
+    orig = mtbridge.Handler._chat
+
+    def traced(self):
+        t0 = time.time()
+        acc = cfg.active_account() or {}
+        model = "?"
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+            model = json.loads(raw).get("model", "?") if raw else "?"
+        except Exception:  # noqa: BLE001
+            pass
+        status, err = None, None
+        try:
+            return orig(self)
+        except Exception as e:  # noqa: BLE001
+            status, err = getattr(e, "code", 502), str(e)[:60]
+            raise
+        finally:
+            st.set(requests=st.requests + 1)
+            with st.lock:
+                st.recent.append({
+                    "t": time.strftime("%H:%M:%S"), "model": model,
+                    "ms": int((time.time() - t0) * 1000),
+                    "status": status, "err": err})
+            st.dirty = True
+    mtbridge.Handler._chat = traced
+
+
+def bg_job(st: S, what: str, fn):
+    """把一次可能较慢的操作丢到线程池，主循环立刻返回。"""
+    def run():
+        st.set(busy=what)
+        st.log(f"开始：{what}")
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            st.set(msg=f"{what} 失败：{e}")
+            st.log(f"{what} 失败：{e}", "err")
+        else:
+            st.log(f"完成：{what}")
+        st.set(busy="")
+    threading.Thread(target=run, daemon=True).start()
+
+
+# ---------------------------------------------------------------- 主循环
+
+
+def run_tui(cfg_path: Path, port: int) -> int:
     cfg = mtbridge.load_config(cfg_path)
-    dst = Path(out)
-    dst.write_text(cfg.export_json(), encoding="utf-8")
-    return f"已导出 {len(cfg.accounts)} 个账户 -> {dst}"
+    errs = cfg.problems()
+    if errs:
+        for e in errs:
+            print(f"配置错误：{e}", file=sys.stderr)
+        return 2
+    for w in cfg.warnings():
+        print(f"提醒：{w}", file=sys.stderr)
+
+    mtbridge.STATE.cfg = cfg                       # 必须是模块级的那个
+    mtbridge.STATE.upstream = mtbridge.Upstream(cfg)
+
+    from http.server import ThreadingHTTPServer
+
+    try:
+        httpd = ThreadingHTTPServer((cfg.host, port), mtbridge.Handler)
+    except OSError as e:
+        print(f"无法绑定 {cfg.host}:{port} — {e}", file=sys.stderr)
+        return 1
+    bound = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    st = S(cfg, bound)
+    st.log(f"代理已启动 127.0.0.1:{bound}  pid={os.getpid()}")
+    st.log(f"账户 {len(cfg.accounts)} 个")
+    workers(st, httpd)
+
+    t_taps, last_tap = 0, 0.0
+    with Term() as t:
+        while st.running:
+            t.draw(render(st))
+            k = t.key(TICK)
+            if k is None:
+                continue
+            accs = cfg.accounts
+            n = len(accs)
+            sel = max(0, min(st.sel, n - 1)) if n else 0
+
+            if k in ("q", "Q", "\x03"):
+                break
+            elif k == "\x01up" or k == "up" or k == "k":
+                if n:
+                    st.set(sel=max(0, sel - 1))
+            elif k == "\x01down" or k == "down" or k == "j":
+                if n:
+                    st.set(sel=min(n - 1, sel + 1))
+            elif k == "pgup":
+                if n:
+                    st.set(sel=max(0, sel - 3))
+            elif k == "pgdn":
+                if n:
+                    st.set(sel=min(n - 1, sel + 3))
+            elif k in ("\r", "\n", " "):
+                if n:
+                    cfg.save_active(accs[sel].get("label", ""))
+                    st.set(msg=f"已切换到 {accs[sel].get('label')}")
+                    st.log(f"切换账户 -> {accs[sel].get('label')}")
+            elif k.isdigit() and k != "0":
+                i = int(k) - 1
+                if i < n:
+                    st.set(sel=i)
+                    cfg.save_active(accs[i].get("label", ""))
+                    st.set(msg=f"已切换到 {accs[i].get('label')}")
+            elif k == "e" and n:
+                a = dict(accs[sel])
+                a["enabled"] = not a.get("enabled", True)
+                cfg.accounts[sel] = a
+                cfg.save()
+                st.set(msg=f"{a.get('label')} 已{'启用' if a['enabled'] else '停用'}")
+                st.log(f"{a.get('label')} -> {'启用' if a['enabled'] else '停用'}")
+            elif k == "d" and n:
+                a = cfg.accounts.pop(sel)
+                cfg.save()
+                st.set(sel=max(0, sel - 1), msg=f"已删除 {a.get('label')}")
+                st.log(f"删除账户 {a.get('label')}")
+            elif k == "R":
+                acc = cfg.active_account()
+                if acc:
+                    bg_job(st, "刷新", lambda: _refresh(st, acc))
+                else:
+                    st.set(msg="没有活动账户")
+            elif k == "g":
+                st.set(log_off=0)
+            elif k == "G":
+                with st.lock:
+                    st.log_off = max(0, len(st.logs) - 3)
+            elif k == "t":
+                now = time.time()
+                t_taps = t_taps + 1 if now - last_tap < 3.0 else 1
+                last_tap = now
+                if t_taps >= 5:
+                    t_taps = 0
+                    bg_job(st, "开户", lambda: _provision(st))
+                elif t_taps >= 3:
+                    st.set(msg=f"再按 {5 - t_taps} 次 t 解锁调试入口")
+            else:
+                if t_taps:
+                    t_taps = 0
+                if k == "\x02click":
+                    pass          # 暂不支持点击定位，先不吞掉其它键
+
+    st.running = False
+    httpd.shutdown()
+    return 0
 
 
-def do_import(cfg_path: Path, src: str, replace: bool) -> str:
-    cfg = mtbridge.load_config(cfg_path)
-    text = Path(src).read_text(encoding="utf-8")
-    added, skipped = cfg.import_json(text, replace=replace)
-    return f"导入完成：新增 {added}，跳过重复 {skipped}"
+def _refresh(st: S, acc):
+    up = mtbridge.Upstream(st.cfg)
+    _, models = up.models(acc["clientId"])
+    st.set(model_count=len(models), msg=f"模型 {len(models)}" if models else "获取模型失败")
+    q = up.probe_quota(acc, models[0]["name"] if models
+                       else "deepseek/deepseek-v3.2-exp")
+    if q:
+        with st.lock:
+            st.quota[acc["uuid"]] = q
+        st.set(msg=f"配额 {q['used']}/{q['total']}")
+
+
+def _provision(st: S):
+    acc = mtbridge.add_test_account(st.cfg)
+    st.set(sel=max(0, len(st.cfg.accounts) - 1),
+           msg=f"已创建 {acc.get('label')}")
+    st.log(f"开户成功 {acc.get('label')}")
 
 
 def headless(cfg_path: Path, port: int) -> int:
@@ -371,13 +562,11 @@ def headless(cfg_path: Path, port: int) -> int:
     if errs:
         for e in errs:
             print(f"配置错误：{e}", file=sys.stderr)
-        print(f"\n请检查 {cfg.path}", file=sys.stderr)
         return 2
     for w in cfg.warnings():
         print(f"提醒：{w}", file=sys.stderr)
     from http.server import ThreadingHTTPServer
 
-    # 关键：必须写 mtbridge.STATE，Handler 用的是模块级的那个
     mtbridge.STATE.cfg = cfg
     mtbridge.STATE.upstream = mtbridge.Upstream(cfg)
     httpd = ThreadingHTTPServer((cfg.host, port), mtbridge.Handler)
@@ -392,172 +581,31 @@ def headless(cfg_path: Path, port: int) -> int:
     return 0
 
 
-# ------------------------------------------------------------------ 主循环
-
-def run_tui(cfg_path: Path, port: int) -> int:
-    cfg = mtbridge.load_config(cfg_path)
-    errs = cfg.problems()
-    if errs:
-        for e in errs:
-            print(f"配置错误：{e}", file=sys.stderr)
-        return 2
-    for w in cfg.warnings():
-        print(f"提醒：{w}", file=sys.stderr)
-
-    # 关键：必须写 mtbridge.STATE，Handler 用的是模块级的那个
-    mtbridge.STATE.cfg = cfg
-    mtbridge.STATE.upstream = mtbridge.Upstream(cfg)
-
-    from http.server import ThreadingHTTPServer
-
-    try:
-        httpd = ThreadingHTTPServer((cfg.host, port), mtbridge.Handler)
-    except OSError as e:
-        print(f"无法绑定 {cfg.host}:{port} — {e}", file=sys.stderr)
-        return 1
-    bound = httpd.server_address[1]
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-
-    st = {"running": True, "model_count": 0, "requests": 0,
-          "quota": {}, "recent": [], "msg": ""}
-
-    # 记录调用（不覆盖 _chat 本身，只在旁边挂钩，便于回退）
-    orig = mtbridge.Handler._chat
-
-    def traced(self):
-        t0 = time.time()
-        acc = cfg.active_account() or {}
-        try:
-            return orig(self)
-        finally:
-            st["requests"] += 1
-    mtbridge.Handler._chat = traced
-
-    def bg():
-        while True:
-            time.sleep(15)
-            acc = cfg.active_account()
-            if not acc:
-                continue
-            _, models = mtbridge.Upstream(cfg).models(acc["clientId"])
-            if models:
-                st["model_count"] = len(models)
-            probe = models[0]["name"] if models else "deepseek/deepseek-v3.2-exp"
-            q = mtbridge.Upstream(cfg).probe_quota(acc, probe)
-            if q:
-                st["quota"][acc["uuid"]] = q
-    threading.Thread(target=bg, daemon=True).start()
-
-    sel = 0
-    sel_sticky = 0.0          # 选中项的"最后操作时间"，仅用于提示
-    t_taps = 0                # 隐藏调试入口的连按计数
-    last_tap = 0.0
-    with Term() as t:
-        while True:
-            t.render(draw(cfg, bound, st, sel))
-            ev = t.read_event(0.3)
-            if ev is None:
-                # 心跳：让「最近调用」这类会变的内容有机会刷新
-                if st["recent"] or st["quota"]:
-                    t.render(draw(cfg, bound, st, sel))
-                continue
-            kind, val = ev
-            if kind == "wheel":
-                if cfg.accounts:
-                    sel = max(0, min(sel - (1 if val > 0 else -1), len(cfg.accounts) - 1))
-                    sel_sticky = time.time()
-                continue
-            if kind == "click":
-                continue
-            # ---- 键盘
-            if val in ("q", "Q", "\x03"):
-                break
-            elif val in ("\r", "\n", " "):
-                if cfg.accounts:
-                    cfg.save_active(cfg.accounts[sel].get("label", ""))
-                    st["msg"] = f"已切换到 {cfg.accounts[sel].get('label')}"
-            elif val in ("j", "down"):
-                sel = min(sel + 1, max(0, len(cfg.accounts) - 1)); sel_sticky = time.time()
-            elif val in ("k", "up"):
-                sel = max(sel - 1, 0); sel_sticky = time.time()
-            elif val in ("pgdn",):
-                sel = min(sel + 3, max(0, len(cfg.accounts) - 1)); sel_sticky = time.time()
-            elif val in ("pgup",):
-                sel = max(sel - 3, 0); sel_sticky = time.time()
-            elif val.isdigit() and val != "0":
-                i = int(val) - 1
-                if i < len(cfg.accounts):
-                    sel = i
-                    cfg.save_active(cfg.accounts[i].get("label", ""))
-                    st["msg"] = f"已切换到 {cfg.accounts[i].get('label')}"
-            elif val == "e" and cfg.accounts:
-                a = dict(cfg.accounts[sel])
-                a["enabled"] = not a.get("enabled", True)
-                cfg.accounts[sel] = a
-                cfg.save()
-                st["msg"] = f"{a.get('label')} 已{'启用' if a['enabled'] else '停用'}"
-            elif val == "d" and cfg.accounts:
-                a = cfg.accounts.pop(sel)
-                cfg.save()
-                sel = max(0, sel - 1)
-                st["msg"] = f"已删除 {a.get('label')}"
-            elif val == "R":
-                acc = cfg.active_account()
-                if acc:
-                    _, models = mtbridge.Upstream(cfg).models(acc["clientId"])
-                    st["model_count"] = len(models)
-                    st["msg"] = f"模型 {len(models)}" if models else "获取模型失败"
-            elif val == "t":
-                # 隐藏的调试入口：连按 5 次 t 才解锁，对齐安卓版连点标题 5 次。
-                # 超过 3 秒间隔视为重新开始。
-                now = time.time()
-                t_taps = t_taps + 1 if now - last_tap < 3.0 else 1
-                last_tap = now
-                if t_taps >= 5:
-                    t_taps = 0
-                    st["msg"] = "正在开户…"
-                    t.render(draw(cfg, bound, st, sel))
-                    try:
-                        acc = mtbridge.add_test_account(cfg)
-                    except Exception as e:  # noqa: BLE001
-                        st["msg"] = f"开户失败：{e}"
-                    else:
-                        sel = max(0, len(cfg.accounts) - 1)
-                        q = (f"{acc['quotaUsed']}/{acc['quotaTotal']}"
-                             if acc.get("quotaTotal") else "?")
-                        st["msg"] = f"已创建 {acc.get('label')} 配额 {q}"
-                elif t_taps >= 3:
-                    st["msg"] = f"再按 {5 - t_taps} 次 t 解锁调试入口"
-            else:
-                if t_taps:
-                    t_taps = 0
-            t.render(draw(cfg, bound, st, sel))
-
-    httpd.shutdown()
-    mtbridge.Handler._chat = orig
-    return 0
+# ---------------------------------------------------------------- 入口
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        prog="mtbridge-tui",
-        description="MiniTavern 本地代理 · 终端界面",
-    )
+    ap = argparse.ArgumentParser(prog="mtbridge-tui",
+                                 description="MiniTavern 本地代理 · 终端界面")
     ap.add_argument("-c", "--config", type=Path,
                     default=Path(__file__).resolve().parent / "config.json")
-    ap.add_argument("--port", type=int, default=None, help="覆盖配置里的端口")
+    ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--headless", action="store_true", help="不启界面，只跑代理")
-    ap.add_argument("--export", metavar="FILE", help="导出账户列表后退出")
-    ap.add_argument("--import_", dest="import_", metavar="FILE",
-                    help="导入账户列表后退出")
-    ap.add_argument("--replace", action="store_true", help="导入时替换现有账户")
+    ap.add_argument("--export", metavar="FILE")
+    ap.add_argument("--import_", dest="import_", metavar="FILE")
+    ap.add_argument("--replace", action="store_true")
     args = ap.parse_args()
 
     if args.export:
-        print(do_export(args.config, args.export))
+        cfg = mtbridge.load_config(args.config)
+        Path(args.export).write_text(cfg.export_json(), encoding="utf-8")
+        print(f"已导出 {len(cfg.accounts)} 个账户 -> {args.export}")
         return 0
     if args.import_:
-        print(do_import(args.config, args.import_, args.replace))
+        cfg = mtbridge.load_config(args.config)
+        a, sk = cfg.import_json(Path(args.import_).read_text(encoding="utf-8"),
+                                replace=args.replace)
+        print(f"导入完成：新增 {a}，跳过重复 {sk}")
         return 0
 
     cfg = mtbridge.load_config(args.config)
@@ -565,7 +613,7 @@ def main() -> int:
     if args.headless:
         return headless(args.config, port)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        print("非交互终端，转为 headless 模式", file=sys.stderr)
+        print("非交互终端，转 headless 模式", file=sys.stderr)
         return headless(args.config, port)
     return run_tui(args.config, port)
 
