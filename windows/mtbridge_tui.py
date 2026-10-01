@@ -109,6 +109,7 @@ class S:
         self.logs: deque = deque(maxlen=LOG_MAX)
         self.log_off = 0
         self.busy = ""            # 正在做的事，显示在状态行
+        self.diag = False         # 诊断：把收到的按键写进日志
         self.dirty = True
 
     def log(self, msg, kind="info"):
@@ -430,6 +431,95 @@ def bg_job(st: S, what: str, fn):
 # ---------------------------------------------------------------- 主循环
 
 
+def handle_key(st: S, cfg, k: str, ctx: dict) -> bool:
+    """处理一个按键。返回 True 表示退出主循环。
+
+    抽成独立函数是为了能脱离终端直接测试每个键的分支 ——
+    之前手势逻辑埋在 while 循环里，出问题没法定位。
+    """
+    accs = cfg.accounts
+    n = len(accs)
+    sel = max(0, min(st.sel, n - 1)) if n else 0
+
+    if k in ("q", "Q", "\x03"):
+        return True
+
+    # ---- 选择：方向键 / 滚轮 / vim 键 / 数字
+    if k in ("\x01up", "up", "k"):
+        if n:
+            st.set(sel=max(0, sel - 1))
+        return False
+    if k in ("\x01down", "down", "j"):
+        if n:
+            st.set(sel=min(n - 1, sel + 1))
+        return False
+    if k == "pgup":
+        if n:
+            st.set(sel=max(0, sel - 3))
+        return False
+    if k == "pgdn":
+        if n:
+            st.set(sel=min(n - 1, sel + 3))
+        return False
+    if k.isdigit() and k != "0":
+        i = int(k) - 1
+        if 0 <= i < n:
+            st.set(sel=i)
+            cfg.save_active(accs[i].get("label", ""))
+            st.set(msg=f"已切换到 {accs[i].get('label')}")
+        return False
+
+    if k in ("\r", "\n", " "):
+        if n:
+            cfg.save_active(accs[sel].get("label", ""))
+            st.set(msg=f"已切换到 {accs[sel].get('label')}")
+            st.log(f"切换账户 -> {accs[sel].get('label')}")
+        return False
+    if k == "e" and n:
+        a = dict(accs[sel])
+        a["enabled"] = not a.get("enabled", True)
+        cfg.accounts[sel] = a
+        cfg.save()
+        st.set(msg=f"{a.get('label')} 已{'启用' if a['enabled'] else '停用'}")
+        st.log(f"{a.get('label')} -> {'启用' if a['enabled'] else '停用'}")
+        return False
+    if k == "d" and n:
+        a = cfg.accounts.pop(sel)
+        cfg.save()
+        st.set(sel=max(0, sel - 1), msg=f"已删除 {a.get('label')}")
+        st.log(f"删除账户 {a.get('label')}")
+        return False
+    if k == "R":
+        acc = cfg.active_account()
+        if acc:
+            bg_job(st, "刷新", lambda: _refresh(st, acc))
+        else:
+            st.set(msg="没有活动账户")
+        return False
+    if k == "g":
+        st.set(log_off=0)
+        return False
+    if k == "G":
+        with st.lock:
+            st.log_off = max(0, len(st.logs) - 3)
+        return False
+    if k == "t":
+        now = time.time()
+        ctx["t_taps"] = (ctx["t_taps"] + 1
+                         if now - ctx["last_tap"] < 3.0 else 1)
+        ctx["last_tap"] = now
+        if ctx["t_taps"] >= 5:
+            ctx["t_taps"] = 0
+            bg_job(st, "开户", lambda: _provision(st))
+        elif ctx["t_taps"] >= 3:
+            st.set(msg=f"再按 {5 - ctx['t_taps']} 次 t 解锁调试入口")
+        return False
+
+    ctx["t_taps"] = 0
+    return False
+
+
+
 def run_tui(cfg_path: Path, port: int) -> int:
     cfg = mtbridge.load_config(cfg_path)
     errs = cfg.problems()
@@ -456,9 +546,12 @@ def run_tui(cfg_path: Path, port: int) -> int:
     st = S(cfg, bound)
     st.log(f"代理已启动 127.0.0.1:{bound}  pid={os.getpid()}")
     st.log(f"账户 {len(cfg.accounts)} 个")
+    st.diag = os.environ.get("MTB_DIAG") == "1"   # 诊断模式：把收到的按键写进日志
+    if st.diag:
+        print("诊断模式已开启，按键会记录到日志面板", file=sys.stderr)
     workers(st, httpd)
 
-    t_taps, last_tap = 0, 0.0
+    ctx = {"t_taps": 0, "last_tap": 0.0}
     with Term() as t:
         while st.running:
             t.draw(render(st))
@@ -469,68 +562,10 @@ def run_tui(cfg_path: Path, port: int) -> int:
             n = len(accs)
             sel = max(0, min(st.sel, n - 1)) if n else 0
 
-            if k in ("q", "Q", "\x03"):
+            if st.diag:
+                st.log(f"收到按键 {k!r}  选中={sel}", "diag")
+            if handle_key(st, cfg, k, ctx):
                 break
-            elif k == "\x01up" or k == "up" or k == "k":
-                if n:
-                    st.set(sel=max(0, sel - 1))
-            elif k == "\x01down" or k == "down" or k == "j":
-                if n:
-                    st.set(sel=min(n - 1, sel + 1))
-            elif k == "pgup":
-                if n:
-                    st.set(sel=max(0, sel - 3))
-            elif k == "pgdn":
-                if n:
-                    st.set(sel=min(n - 1, sel + 3))
-            elif k in ("\r", "\n", " "):
-                if n:
-                    cfg.save_active(accs[sel].get("label", ""))
-                    st.set(msg=f"已切换到 {accs[sel].get('label')}")
-                    st.log(f"切换账户 -> {accs[sel].get('label')}")
-            elif k.isdigit() and k != "0":
-                i = int(k) - 1
-                if i < n:
-                    st.set(sel=i)
-                    cfg.save_active(accs[i].get("label", ""))
-                    st.set(msg=f"已切换到 {accs[i].get('label')}")
-            elif k == "e" and n:
-                a = dict(accs[sel])
-                a["enabled"] = not a.get("enabled", True)
-                cfg.accounts[sel] = a
-                cfg.save()
-                st.set(msg=f"{a.get('label')} 已{'启用' if a['enabled'] else '停用'}")
-                st.log(f"{a.get('label')} -> {'启用' if a['enabled'] else '停用'}")
-            elif k == "d" and n:
-                a = cfg.accounts.pop(sel)
-                cfg.save()
-                st.set(sel=max(0, sel - 1), msg=f"已删除 {a.get('label')}")
-                st.log(f"删除账户 {a.get('label')}")
-            elif k == "R":
-                acc = cfg.active_account()
-                if acc:
-                    bg_job(st, "刷新", lambda: _refresh(st, acc))
-                else:
-                    st.set(msg="没有活动账户")
-            elif k == "g":
-                st.set(log_off=0)
-            elif k == "G":
-                with st.lock:
-                    st.log_off = max(0, len(st.logs) - 3)
-            elif k == "t":
-                now = time.time()
-                t_taps = t_taps + 1 if now - last_tap < 3.0 else 1
-                last_tap = now
-                if t_taps >= 5:
-                    t_taps = 0
-                    bg_job(st, "开户", lambda: _provision(st))
-                elif t_taps >= 3:
-                    st.set(msg=f"再按 {5 - t_taps} 次 t 解锁调试入口")
-            else:
-                if t_taps:
-                    t_taps = 0
-                if k == "\x02click":
-                    pass          # 暂不支持点击定位，先不吞掉其它键
 
     st.running = False
     httpd.shutdown()
