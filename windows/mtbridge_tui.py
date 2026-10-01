@@ -110,6 +110,8 @@ class S:
         self.log_off = 0
         self.busy = ""            # 正在做的事，显示在状态行
         self.diag = False         # 诊断：把收到的按键写进日志
+        self.hits: dict = {}      # 行号 -> (kind, 载荷)，鼠标点击用
+        self.confirm: str = ""     # 非空表示正处于二次确认状态
         self.dirty = True
 
     def log(self, msg, kind="info"):
@@ -210,8 +212,8 @@ class Term:
         self._prev_frame = frame
         return True
 
-    def key(self, timeout: float) -> str | None:
-        """阻塞等一个按键，返回键值；ESC 开头的返回 ''。超时返回 None。"""
+    def key(self, timeout: float):
+        """阻塞等输入。返回 字符 / (按键, x, y) 鼠标 / None 超时。"""
         if not self.tty:
             time.sleep(timeout)
             return None
@@ -223,7 +225,10 @@ class Term:
                     ch = msvcrt.getwch()
                     if ch != "\x1b":
                         return ch
-                    return self._seq()       # 方向键/鼠标，事件循环另行忽略
+                    r = self._seq()
+                    if isinstance(r, tuple):
+                        return r
+                    return r[0] if r else ""
                 time.sleep(timeout)
                 if msvcrt.kbhit():
                     continue
@@ -234,9 +239,12 @@ class Term:
         if not r:
             return None
         ch = sys.stdin.read(1)
-        if ch == "\x1b":
-            return self._seq()
-        return ch
+        if ch != "\x1b":
+            return ch
+        r = self._seq()
+        if isinstance(r, tuple):
+            return r
+        return r[0] if r else ""
 
     def _seq(self):
         """读完一个 ESC 序列，翻译成事件；不是鼠标/方向键则返回空串。"""
@@ -250,78 +258,114 @@ class Term:
                 break
         if seq.startswith("[<"):
             p = seq[2:].split(";")
-            if len(p) >= 3:
-                if p[0] in ("A", "B"):
-                    return "\x01up" if p[0] == "A" else "\x01down"
-                if p[0] in ("M", "m"):
-                    return "\x02click"
-            return ""
+            if len(p) >= 3 and p[0] in ("M", "m"):
+                btn = 0 if p[0] == "m" else int(p[0]) & 3
+                if btn == 0:                     # 左键
+                    try:
+                        return "\x02", int(p[1]), int(p[2])
+                    except ValueError:
+                        return "", 0, 0
+            return "", 0, 0
         return {
             "[A": "up", "[B": "down", "[C": "right", "[D": "left",
             "OA": "up", "OB": "down", "OC": "right", "OD": "left",
-            "[5": "pgup", "[6": "pgdn",
         }.get(seq, "")
+
+    @staticmethod
+    def y_to_row(y: int) -> int:
+        """SGR 报的是 1-based 像素行，按 1/24 屏换算成终端行。"""
+        h = max(18, shutil.get_terminal_size().lines)
+        return max(1, (y - 1) * h // 24)
 
 
 # ---------------------------------------------------------------- 渲染
 
 
 def render(st: S) -> list[str]:
-    w = max(60, shutil.get_terminal_size().columns)
-    h = max(18, shutil.get_terminal_size().lines)
+    """渲染整帧，同时把可点击区域登记到 st.hits（行号 -> 动作）。"""
+    ts = shutil.get_terminal_size()
+    w = max(64, ts.columns)
+    h = max(18, ts.lines)
     accs = st.accounts()
     sel = max(0, min(st.sel, len(accs) - 1)) if accs else 0
     act = st.active()
-    out = []
+    out: list[str] = []
+    hits: dict[int, tuple] = {}
 
-    # ---- 顶栏
-    out.append("  " + c("MiniTavern Bridge", WHITE, BOLD)
-               + c("  " + c(f"v{mtbridge.__version__}", GREY), GREY)
-               + ("  " + c("● 运行中", GREEN, BOLD) if st.running
-                  else "  " + c("○ 已停止", RED, BOLD)))
-    out.append("  " + c(f"http://127.0.0.1:{st.port}/v1", TEAL))
-    out.append("  " + c(f"账户 {len(accs)}   模型 {st.model_count or '—'}   "
-                          f"请求 {st.requests}", GREY))
+    def add(s, hit=None):
+        if hit:
+            hits[len(out) + 1] = [hit]        # 行号从 1 开始，与终端一致
+        out.append(s)
+
+    # ---------------- 顶栏
+    add("  " + c("MiniTavern Bridge", WHITE, BOLD)
+        + c("  v" + mtbridge.__version__, GREY)
+        + ("   " + c("● 运行中", GREEN, BOLD) if st.running
+           else "   " + c("○ 已停止", RED, BOLD)))
+    add("  " + c(f"http://127.0.0.1:{st.port}/v1", TEAL))
+    add("  " + c(f"账户 {len(accs)}   模型 {st.model_count or '—'}   "
+                 f"请求 {st.requests}", GREY))
     if act:
         line = "  活动  " + c(act.get("label", "?"), TEAL, BOLD)
         q = st.quota.get(act["uuid"])
         if q:
             line += c(f"   配额 {q['used']}/{q['total']}",
                       YELLOW if q["used"] < q["total"] else RED)
-        out.append(line)
+        else:
+            line += c("   配额 未知（用一次对话后自动更新）", DIMGREY)
+        add(line)
     else:
-        out.append("  活动  " + c("无 —— 还没有账户", RED, BOLD))
+        add("  活动  " + c("无 —— 还没有账户", RED, BOLD))
     if st.busy:
-        out.append("  " + c("… " + st.busy, YELLOW))
+        add("  " + c("… " + st.busy, YELLOW))
     elif st.msg:
-        out.append("  " + c(st.msg, YELLOW))
-    out.append("")
+        add("  " + c(st.msg, YELLOW))
+    if st.confirm:
+        add("")
+        add("  " + c(f"⚠ {st.confirm}", YELLOW, BOLD)
+            + c("   y 确认 / n 取消", GREY))
 
-    # ---- 最近调用
-    out.append("  " + c("最近调用", WHITE, BOLD))
+    # ---------------- 最近调用
+    add("")
+    add("  " + c("最近调用", WHITE, BOLD))
     if not st.recent:
-        out.append("    " + c("暂无", DIMGREY))
+        add("    " + c("暂无", DIMGREY))
     for r in reversed(list(st.recent)):
         col = RED if r.get("err") else (TEAL if (r.get("status") or 0) < 300 else YELLOW)
-        out.append("    " + c(r.get("t", ""), GREY) + "  "
-                   + c(f"{r.get('model','?').rsplit('/',1)[-1]:<24}", col)
-                   + c(f"{r.get('ms',0):>6}ms ", GREY)
-                   + c(f"HTTP {r.get('status','-')}", col)
-                   + (c("  " + r["err"], RED) if r.get("err") else ""))
-    out.append("")
+        add("    " + c(r.get("t", ""), GREY) + "  "
+            + c(f"{r.get('model','?').rsplit('/',1)[-1]:<24}", col)
+            + c(f"{r.get('ms',0):>6}ms ", GREY)
+            + c(f"HTTP {r.get('status','-')}", col)
+            + (c("  " + r["err"], RED) if r.get("err") else ""))
+    add("")
 
-    # ---- 账户表（分掉日志区之后剩下的高度）
+    # ---------------- 操作栏（可点击，按可见列区分按钮）
+    bar = "  "
+    segs: list[tuple[str, int, int]] = []
+    for label, action in (("确认切换", "apply"), ("刷新", "refresh"),
+                          ("停用/启用", "toggle"), ("删除", "delete"),
+                          ("退出", "quit")):
+        if action in ("apply", "delete") and not accs:
+            continue
+        x0 = len(vis(bar)) + 1          # 可见列，不是 len(bar)（含转义序列）
+        bar += c(f" {label} ", BGV, YELLOW) + "  "
+        segs.append((action, x0, len(vis(bar)) - 2))
+    add(bar)
+    for action, x0, x1 in segs:
+        hits.setdefault(len(out), []).append((action, x0, x1))
+    add("")
+
+    # ---------------- 账户表
     log_h = max(3, min(12, h // 3))
-    acct_h = max(1, h - len(out) - log_h - 3)
-    out.append("  " + c("账户", WHITE, BOLD)
-               + c("   ↑↓ / j k / 滚轮 选择 · Enter 切换 · e 停用 · d 删除 · R 刷新 · q 退出",
-                   GREY))
+    acct_h = max(1, h - len(out) - log_h - 2)
+    add("  " + c("账户", WHITE, BOLD)
+        + c("   j/k 或 数字键 选择（也可直接点击某行）", GREY))
     if not accs:
-        out.append("    " + c("（空）编辑 config.json 或用 --import_ 导入", DIMGREY))
+        add("    " + c("（空）编辑 config.json 或用 --import_ 导入", DIMGREY))
     for i, a in enumerate(accs[:acct_h]):
         on = a["uuid"] == (act or {}).get("uuid")
         mark = c("▶", TEAL, BOLD) if on else " "
-        body = (f"{mark} {a.get('label','?'):<14} {a.get('uuid','')[:16]}…")
+        body = f"{mark} {a.get('label','?'):<14} {a.get('uuid','')[:16]}…"
         tail = ""
         if not a.get("enabled", True):
             tail += c("  [停用]", RED)
@@ -329,23 +373,24 @@ def render(st: S) -> list[str]:
         if q:
             tail += c(f"  {q['used']}/{q['total']}", GREY)
         line = "  " + body + tail
-        out.append(c(line.ljust(w - 1), BGV, WHITE, BOLD) if i == sel
-                   else (c(line, TEAL) if on else c(line, GREY)))
+        if i == sel:
+            add(c(line.ljust(w - 1), BGV, WHITE, BOLD), ("row", i))
+        else:
+            add(c(line, TEAL) if on else c(line, GREY), ("row", i))
 
-    # ---- 日志面板
-    out.append("  " + c("─" * (w - 4), DIMGREY))
-    out.append("  " + c("日志", WHITE, BOLD)
-               + c("   g/G 跳到最新/最早 · ↑↓ 滚动", GREY))
+    # ---------------- 日志面板
+    add("  " + c("─" * (w - 4), DIMGREY))
+    add("  " + c("日志", WHITE, BOLD) + c("   g 跳最新 / G 跳最早", GREY))
     with st.lock:
         logs = list(st.logs)
-    view = log_h
-    end = len(logs) - st.log_off
-    start = max(0, end - view)
-    seg = logs[start:end]
-    while len(seg) < view:
+    end_ = len(logs) - st.log_off
+    seg = logs[max(0, end_ - log_h):end_]
+    while len(seg) < log_h:
         seg.insert(0, "")
     for ln in seg:
-        out.append(c(cut("  " + ln, w - 2), DIMGREY) if ln else "")
+        add(c(cut("  " + ln, w - 2), DIMGREY) if ln else "")
+
+    st.hits = hits
     return out
 
 
@@ -353,32 +398,41 @@ def render(st: S) -> list[str]:
 
 
 def workers(st: S, httpd):
-    """所有网络 I/O 都在这里，主循环不碰。"""
+    """所有网络 I/O 都在这里，主循环不碰。
+
+    注意：**定时任务不探测配额**。probe_quota 发的是真实对话请求，
+    每 12 秒探一次等于白烧额度。配额改为从任意一次真实对话响应的
+    otherInfo 里顺带读取（不额外消耗），只有手动按 R 才主动探测。
+    """
     cfg = st.cfg
 
-    def refresh_quota(acc):
-        up = mtbridge.Upstream(cfg)
-        _, models = up.models(acc["clientId"])
-        if models:
-            st.set(model_count=len(models))
-        q = up.probe_quota(acc, models[0]["name"] if models
-                           else "deepseek/deepseek-v3.2-exp")
+    # 挂钩上游的配额解析：任何对话响应都会经过这里，等于免费拿到配额
+    orig_parse = mtbridge.parse_quota
+
+    def parse_quota(text):
+        q = orig_parse(text)
         if q:
-            with st.lock:
-                st.quota[acc["uuid"]] = q
-        return len(models)
+            acc = cfg.active_account()
+            if acc:
+                with st.lock:
+                    st.quota[acc["uuid"]] = q
+                st.dirty = True
+        return q
+
+    mtbridge.parse_quota = parse_quota
 
     def periodic():
+        """只刷模型目录（GET /api-keys/list，不消耗对话额度）。"""
         while st.running:
-            time.sleep(12)
+            time.sleep(20)
             acc = st.active()
             if not acc:
                 continue
             try:
-                refresh_quota(acc)
-                st.dirty = True
+                _, models = mtbridge.Upstream(cfg).models(acc["clientId"])
+                st.set(model_count=len(models))
             except Exception as e:  # noqa: BLE001
-                st.log(f"刷新配额失败：{e}", "err")
+                st.log(f"刷新模型目录失败：{e}", "err")
 
     threading.Thread(target=periodic, daemon=True).start()
 
@@ -431,11 +485,49 @@ def bg_job(st: S, what: str, fn):
 # ---------------------------------------------------------------- 主循环
 
 
+def do_action(st: S, cfg, action: str) -> bool:
+    """执行一个动作（键盘与鼠标共用）。返回 True 表示退出。"""
+    accs = cfg.accounts
+    n = len(accs)
+    sel = max(0, min(st.sel, n - 1)) if n else 0
+
+    if action == "apply":
+        if n:
+            cfg.save_active(accs[sel].get("label", ""))
+            st.set(msg=f"已切换到 {accs[sel].get('label')}")
+            st.log(f"切换账户 -> {accs[sel].get('label')}")
+    elif action == "refresh":
+        acc = cfg.active_account()
+        if acc:
+            bg_job(st, "刷新", lambda: _refresh(st, acc))
+        else:
+            st.set(msg="没有活动账户")
+    elif action == "toggle":
+        if n:
+            a = dict(accs[sel])
+            a["enabled"] = not a.get("enabled", True)
+            cfg.accounts[sel] = a
+            cfg.save()
+            st.set(msg=f"{a.get('label')} 已{'启用' if a['enabled'] else '停用'}")
+            st.log(f"{a.get('label')} -> {'启用' if a['enabled'] else '停用'}")
+    elif action == "delete":
+        if st.confirm:
+            a = cfg.accounts.pop(sel) if sel < len(cfg.accounts) else None
+            cfg.save()
+            st.set(confirm="", sel=max(0, sel - 1),
+                   msg=f"已删除 {a.get('label') if a else ''}")
+            st.log(f"删除账户 {(a or {}).get('label')}")
+        elif n:
+            st.set(confirm=f"确认删除 {accs[sel].get('label')}？此操作不可撤销")
+    elif action == "quit":
+        return True
+    return False
+
+
 def handle_key(st: S, cfg, k: str, ctx: dict) -> bool:
     """处理一个按键。返回 True 表示退出主循环。
 
-    抽成独立函数是为了能脱离终端直接测试每个键的分支 ——
-    之前手势逻辑埋在 while 循环里，出问题没法定位。
+    抽成独立函数是为了能脱离终端直接测试每个键的分支。
     """
     accs = cfg.accounts
     n = len(accs)
@@ -444,22 +536,21 @@ def handle_key(st: S, cfg, k: str, ctx: dict) -> bool:
     if k in ("q", "Q", "\x03"):
         return True
 
-    # ---- 选择：方向键 / 滚轮 / vim 键 / 数字
-    if k in ("\x01up", "up", "k"):
+    # ---- 删除的二次确认
+    if st.confirm:
+        if k in ("y", "Y"):
+            return do_action(st, cfg, "delete")
+        st.set(confirm="", msg="已取消")
+        return False
+
+    # ---- 选择：j/k 或 数字键（方向键与滚轮在 Windows 终端上不可靠，不启用）
+    if k == "k":
         if n:
             st.set(sel=max(0, sel - 1))
         return False
-    if k in ("\x01down", "down", "j"):
+    if k == "j":
         if n:
             st.set(sel=min(n - 1, sel + 1))
-        return False
-    if k == "pgup":
-        if n:
-            st.set(sel=max(0, sel - 3))
-        return False
-    if k == "pgdn":
-        if n:
-            st.set(sel=min(n - 1, sel + 3))
         return False
     if k.isdigit() and k != "0":
         i = int(k) - 1
@@ -470,32 +561,13 @@ def handle_key(st: S, cfg, k: str, ctx: dict) -> bool:
         return False
 
     if k in ("\r", "\n", " "):
-        if n:
-            cfg.save_active(accs[sel].get("label", ""))
-            st.set(msg=f"已切换到 {accs[sel].get('label')}")
-            st.log(f"切换账户 -> {accs[sel].get('label')}")
-        return False
-    if k == "e" and n:
-        a = dict(accs[sel])
-        a["enabled"] = not a.get("enabled", True)
-        cfg.accounts[sel] = a
-        cfg.save()
-        st.set(msg=f"{a.get('label')} 已{'启用' if a['enabled'] else '停用'}")
-        st.log(f"{a.get('label')} -> {'启用' if a['enabled'] else '停用'}")
-        return False
-    if k == "d" and n:
-        a = cfg.accounts.pop(sel)
-        cfg.save()
-        st.set(sel=max(0, sel - 1), msg=f"已删除 {a.get('label')}")
-        st.log(f"删除账户 {a.get('label')}")
-        return False
+        return do_action(st, cfg, "apply")
+    if k == "e":
+        return do_action(st, cfg, "toggle")
+    if k == "d":
+        return do_action(st, cfg, "delete")
     if k == "R":
-        acc = cfg.active_account()
-        if acc:
-            bg_job(st, "刷新", lambda: _refresh(st, acc))
-        else:
-            st.set(msg="没有活动账户")
-        return False
+        return do_action(st, cfg, "refresh")
     if k == "g":
         st.set(log_off=0)
         return False
@@ -558,12 +630,34 @@ def run_tui(cfg_path: Path, port: int) -> int:
             k = t.key(TICK)
             if k is None:
                 continue
-            accs = cfg.accounts
-            n = len(accs)
-            sel = max(0, min(st.sel, n - 1)) if n else 0
+
+            # ---- 鼠标左键：按行号查热区
+            if isinstance(k, tuple):
+                _, x, y = k
+                row = Term.y_to_row(y)
+                cands = st.hits.get(row, [])
+                if st.diag:
+                    st.log(f"点击 row={row} x={x} -> {cands}", "diag")
+                quit_now = False
+                for item in cands:
+                    # 3 元组 = 操作栏按钮 (action, x0, x1)；2 元组 = 账户行
+                    if len(item) == 3:
+                        action, x0, x1 = item
+                        if x0 <= x <= x1:
+                            quit_now = do_action(st, cfg, action)
+                            break
+                    else:
+                        idx = item[1]
+                        if idx is not None and idx < len(cfg.accounts):
+                            st.set(sel=idx)
+                        break
+                if quit_now:
+                    break
+                continue
 
             if st.diag:
-                st.log(f"收到按键 {k!r}  选中={sel}", "diag")
+                st.log(f"收到按键 {k!r}  选中={max(0, min(st.sel, len(cfg.accounts)-1)) if cfg.accounts else 0}",
+                       "diag")
             if handle_key(st, cfg, k, ctx):
                 break
 
@@ -573,15 +667,17 @@ def run_tui(cfg_path: Path, port: int) -> int:
 
 
 def _refresh(st: S, acc):
+    """手动刷新：先刷不耗额度的模型目录，再问一次要不要真探测配额。"""
     up = mtbridge.Upstream(st.cfg)
     _, models = up.models(acc["clientId"])
     st.set(model_count=len(models), msg=f"模型 {len(models)}" if models else "获取模型失败")
-    q = up.probe_quota(acc, models[0]["name"] if models
-                       else "deepseek/deepseek-v3.2-exp")
-    if q:
-        with st.lock:
-            st.quota[acc["uuid"]] = q
-        st.set(msg=f"配额 {q['used']}/{q['total']}")
+    if st.cfg.get("auto_probe_quota", False):
+        q = up.probe_quota(acc, models[0]["name"] if models
+                           else "deepseek/deepseek-v3.2-exp")
+        if q:
+            with st.lock:
+                st.quota[acc["uuid"]] = q
+            st.set(msg=f"配额 {q['used']}/{q['total']}（已消耗 1 点）")
 
 
 def _provision(st: S):
