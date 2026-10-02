@@ -5,17 +5,21 @@
     android:viewportHeight="108">
 
     <!--
-        主题图标（themed icons / monochrome）把这个层整体转成单色剪影，
+        主题图标（themed icons / monochrome）会把这个层整体转成单色剪影，
         因此只放图形，绝不铺满 viewport —— 铺满会变成一个纯色方块。
         背景色由 <background> 层提供。
-        图形限制在 21..87 的安全区内（自适应图标中心 66dp 直径）。
+
+        居中约束（由 icon_check.py 按贝塞尔实测包围盒验证）：
+          水平  x 32..76  → 中心 54 ✅
+          垂直  y 24..84  → 中心 54 ✅
+          安全区 18..90，全部在内 ✅
     -->
 
     <!-- 盾牌 + 内部镂空的双向箭头（代理/转发） -->
     <path
         android:fillColor="#FFFFFF"
         android:fillType="evenOdd"
-        android:pathData="M54,26 L30,35 v20 c0,17 10.3,32.3 24,36.3 c13.7,-4 24,-19.3 24,-36.3 V35 Z
-                          M54,42 L62.5,53.5 H57.5 V59.5 H50.5 V53.5 H45.5 Z
-                          M54,80 L45.5,68.5 H50.5 V62.5 H57.5 V68.5 H62.5 Z" />
+        android:pathData="M54,24 L32,32 v18 c0,15 9.5,29 22,34 c12.5,-5 22,-19 22,-34 V32 Z
+                          M54,37 L62,47 H57.5 V53 H50.5 V47 H46 Z
+                          M54,71 L46,61 H50.5 V55 H57.5 V61 H62 Z" />
 </vector>
