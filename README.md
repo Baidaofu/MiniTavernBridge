@@ -1,7 +1,8 @@
 # MiniTavern Bridge
 
-把 MiniTavern 会员代理包装成 **OpenAI 兼容端点**，让 pi、Kelivo、SillyTavern
-等任意客户端都能直接使用。
+把 MiniTavern 会员代理包装成 **OpenAI 兼容端点**，让只能设置 Base URL / 请求头的
+客户端（如 pi）也能直接使用。Kelivo、SillyTavern / TauriTavern 支持自定义请求体，
+可以不用本工具直连上游，见 [直连上游](#直连上游不用本工具)。
 
 | | [android/](android/) | [windows/](windows/) |
 |---|---|---|
@@ -24,13 +25,14 @@ MiniTavern 后端有三个特性让通用客户端接不上：
 |---|---|---|---|
 | 1 | `GET /api/ai-proxy/models` 不存在 | 客户端靠它拉模型列表 | 列表永远为空 |
 | 2 | 必须带 `X-Client-Id` 头 | 大多支持 | 可解决 |
-| 3 | **`uuid` 必须在 JSON body 里** | pi / Kelivo 无法注入 body 字段 | **无法解决** |
+| 3 | **`uuid` 必须在 JSON body 里** | pi 只能设 header，不能注入 body | **pi 无法解决**；Kelivo / SillyTavern 可以直连 |
 
-第 3 点是死结。实测 8 种 header 名（`X-Uuid`、`X-Device-Uuid`、`X-Client-Uuid`、
+第 3 点对 pi 是死结。实测 8 种 header 名（`X-Uuid`、`X-Device-Uuid`、`X-Client-Uuid`、
 `uuid`、`X-Monitor-Uuid`、`X-Device-Id` 等）和 2 种 query 参数（`?uuid=`、
 `?deviceUuid=`）**全部无效**，后端一律返回 `uuid should not be empty`。
 
-所以必须在中间垫一层转换。
+Kelivo、SillyTavern / TauriTavern 自带 provider 级自定义 body 与 header，不需要这层
+转换，配置见 [直连上游](#直连上游不用本工具)。其余客户端在中间垫一层转换即可。
 
 ### 认证模型的实测结论
 
@@ -103,6 +105,53 @@ Path       /chat/completions
 
 ---
 
+## 直连上游（不用本工具）
+
+Kelivo 和 SillyTavern / TauriTavern 支持在 provider 级别注入自定义 body 和 header，
+所以可以绕过本工具直接访问上游。上游本身就是标准 OpenAI 流式接口：
+
+```
+POST https://monitor.mini-tavern.com/api/ai-proxy/chat/completions
+Header  X-Client-Id: <clientId>     # 必需
+Body    uuid: <uuid>                # 必需
+Authorization: Bearer <任意>        # 后端忽略
+```
+
+`stream: true` 返回真正的 SSE（`chat.completion.chunk`），结尾没有 `data: [DONE]`，
+常见客户端都能正常收尾。根路径下没有 `/models`，模型列表只能手动填**完整名**。
+
+### Kelivo
+
+provider 里填：
+
+| 字段 | 值 |
+|---|---|
+| API Base URL | `https://monitor.mini-tavern.com/api/ai-proxy` |
+| API 路径 | `/chat/completions` |
+| Response API (/responses) | 关 |
+| API Key | 任意 |
+| 自定义请求 → Header | `X-Client-Id: <clientId>` |
+| 自定义请求 → Body | `uuid: "<uuid>"`（只留这一条） |
+| 模型 | 完整名，如 `deepseek/deepseek-v3.2-exp` |
+
+### SillyTavern / TauriTavern
+
+聊天补全源选 `Custom (OpenAI-compatible)`：
+
+| 字段 | 值 |
+|---|---|
+| Custom Endpoint (Base URL) | `https://monitor.mini-tavern.com/api/ai-proxy` |
+| Custom API Key | 任意 |
+| Enter a Model ID | `deepseek/deepseek-v3.2-exp` |
+| Additional Parameters → Include Request Headers | `X-Client-Id: <clientId>` |
+| Additional Parameters → Include Body Parameters | `uuid: "<uuid>"` |
+
+服务端会把 Base URL 和 `/chat/completions` 拼接，所以 **Base URL 不要带后缀**。
+
+> `uuid` 建议加引号，避免全数字时被 YAML/JSON 解析成数字。
+
+---
+
 ## 账户 uuid 从哪来
 
 MiniTavern 把本地数据全部加密：
@@ -134,7 +183,7 @@ GET https://monitor.mini-tavern.com/api/api-keys/list
 Header: X-Client-Id: <clientId>
 ```
 
-返回 24 个模型。**不带 `X-Client-Id` 会返回空数组**（容易误判成「无模型接口」）。
+返回 26 个模型（数量会变）。**不带 `X-Client-Id` 会返回空数组**（容易误判成「无模型接口」）。
 
 响应里 `title` 是内部短 id（`m1`、`tuzi-vision13`），`model` 是后端要求的完整名。
 后端**只认完整名**，传短 id 会报 `model_not_found`。两个实现都做了自动转换。
