@@ -2,12 +2,18 @@
 
 把 MiniTavern 会员代理包装成 OpenAI 兼容端点。零第三方依赖，只用 Python 标准库。
 
-**两个脚本**：
+**免环境运行（推荐给普通电脑）**：`dist/mtbridge-gui.exe` 是单文件打包版，
+不需要装 Python、不需要任何依赖。把 exe 和 `config.json` 放同一目录后双击即可；
+没有 config.json 时会自动生成模板。程序只有一个窗口、不弹控制台，
+界面随 Windows 暗色/亮色模式自动切换。
+
+**三个脚本**：
 
 | 脚本 | 用途 |
 |---|---|
-| `mtbridge_tui.py` | **日常用这个**。自带终端界面，同时跑代理 |
-| `mtbridge.py` | 无界面的纯命令行版（被 TUI 复用，自检也走它） |
+| `mtbridge_gui.py` | **日常用这个**。tkinter 桌面面板，真按钮、后台线程，不折腾终端键位 |
+| `mtbridge_tui.py` | 终端界面版（同时跑代理），适合无桌面环境 |
+| `mtbridge.py` | 无界面的纯命令行版（被 TUI/GUI 复用，自检也走它） |
 
 安卓版见 [`../android`](../android)（功能一致，MD3 Expressive 界面）。
 
@@ -24,12 +30,15 @@ copy config.example.json config.json
 # 3. 自检（配置合法性 + 上游连通性 + 端口占用）
 python mtbridge.py --check
 
-# 4. 启动：代理 + 终端界面
-python mtbridge_tui.py
+# 4. 启动：代理 + 桌面面板
+python mtbridge_gui.py
 ```
 
-界面里可切换账户、改名、停用/启用、删除、看配额与最近调用。
-详见 [TUI.md](TUI.md)。
+GUI 里可以启停代理、切换/增删改账户、导入导出、新建调试账户、刷新模型
+（显示配额消耗倍率）、检测配额，账户 UUID 和模型 ID/名称单击即复制。
+所有网络操作都在后台线程，按钮有即时状态反馈。
+
+终端界面版：`python mtbridge_tui.py`，详见 [TUI.md](TUI.md)。
 
 不想开界面（跑成后台服务、放脚本里）时用：
 
@@ -51,7 +60,9 @@ Path       /chat/completions
 
 | 命令 | 作用 |
 |---|---|
-| `python mtbridge_tui.py` | **推荐**。启动代理 + 终端界面 |
+| `python mtbridge_gui.py` | **推荐**。启动代理 + 桌面面板 |
+| `python mtbridge_gui.py --port 8899` | 用指定端口启动 GUI |
+| `python mtbridge_tui.py` | 启动代理 + 终端界面 |
 | `python mtbridge_tui.py --headless` | 只跑代理不开界面 |
 | `python mtbridge_tui.py --port 8899` | 覆盖配置里的端口 |
 | `python mtbridge_tui.py --export 账户.json` | 导出账户列表后退出 |

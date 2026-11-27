@@ -1,5 +1,6 @@
 package dev.mtbridge.app.ui
 
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -39,15 +40,23 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.mtbridge.app.core.Account
 import dev.mtbridge.app.core.MiniTavernApi
+import kotlinx.coroutines.launch
 
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
 @Composable
 fun HomeScreen(
     rootOk: Boolean,
@@ -65,6 +74,12 @@ fun HomeScreen(
     snackbar: SnackbarHostState,
 ) {
     var showPort by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
+    val copyText: (String, String) -> Unit = { text, label ->
+        clipboard.setText(AnnotatedString(text))
+        scope.launch { snackbar.showSnackbar("已复制$label: $text") }
+    }
 
     Scaffold(
         topBar = {
@@ -129,7 +144,7 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("可用模型 (${models.size})", style = MaterialTheme.typography.titleMedium)
+                            Text("可用模型 (${models.size}) · 点击复制", style = MaterialTheme.typography.titleMedium)
                             IconButton(onClick = onRefreshModels, enabled = account != null) {
                                 Icon(Refresh, "刷新")
                             }
@@ -141,7 +156,7 @@ fun HomeScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         } else {
-                            // 短 id → 完整模型名的映射表
+                            // 短 id / 完整模型名分别点击复制，右侧显示配额消耗倍率
                             models.forEach { m ->
                                 Row(
                                     Modifier
@@ -154,7 +169,12 @@ fun HomeScreen(
                                         style = MaterialTheme.typography.labelMedium,
                                         fontFamily = FontFamily.Monospace,
                                         color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.width(132.dp),
+                                        modifier = Modifier
+                                            .width(132.dp)
+                                            .combinedClickable(
+                                                onClick = { copyText(m.id, "模型 ID") },
+                                                onLongClick = { copyText(m.id, "模型 ID") },
+                                            ),
                                     )
                                     Text(
                                         "→",
@@ -166,6 +186,21 @@ fun HomeScreen(
                                         m.name,
                                         style = MaterialTheme.typography.bodySmall,
                                         fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .combinedClickable(
+                                                onClick = { copyText(m.name, "模型名") },
+                                                onLongClick = { copyText(m.name, "模型名") },
+                                            ),
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        "${m.consumeRate}x",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.secondary,
                                     )
                                 }
                             }

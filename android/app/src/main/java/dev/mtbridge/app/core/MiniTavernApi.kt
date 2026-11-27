@@ -19,7 +19,12 @@ import java.net.URL
  */
 object MiniTavernApi {
 
-    data class RemoteModel(val id: String, val name: String, val description: String)
+    data class RemoteModel(
+        val id: String,
+        val name: String,
+        val description: String,
+        val consumeRate: Int = 1,
+    )
 
     private fun open(
         path: String,
@@ -61,6 +66,7 @@ object MiniTavernApi {
                     id = o.optString("title").ifBlank { o.optString("model") },
                     name = o.optString("model").ifBlank { o.optString("name") },
                     description = o.optString("description"),
+                    consumeRate = o.optInt("consumeRate", 1),
                 )
             }
         } finally {

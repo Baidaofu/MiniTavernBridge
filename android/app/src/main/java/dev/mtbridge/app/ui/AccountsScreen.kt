@@ -1,6 +1,8 @@
 package dev.mtbridge.app.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -53,6 +55,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import dev.mtbridge.app.core.Account
@@ -95,7 +100,10 @@ fun AccountsScreen(
                     Text(
                         "账户 (${accounts.size})",
                         modifier = Modifier
-                            .clickable {
+                            .clickable(
+                                interactionSource = null,
+                                indication = null,
+                            ) {
                                 titleTaps++
                                 if (titleTaps >= UNLOCK_TAPS) {
                                     titleTaps = 0
@@ -304,6 +312,7 @@ fun AccountsScreen(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun EditAccountDialog(
     account: Account,
@@ -312,6 +321,12 @@ fun EditAccountDialog(
 ) {
     var label by remember { mutableStateOf(account.label) }
     var note by remember { mutableStateOf(account.note) }
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val copyUuid = {
+        clipboard.setText(AnnotatedString(account.uuid))
+        Toast.makeText(context, "已复制账户 uuid", Toast.LENGTH_SHORT).show()
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("编辑账户") },
@@ -334,6 +349,13 @@ fun EditAccountDialog(
                     "uuid  ${account.uuid}",
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .combinedClickable(
+                            onClick = copyUuid,
+                            onLongClick = copyUuid,
+                        )
+                        .padding(vertical = 4.dp),
                 )
             }
         },

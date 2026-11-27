@@ -160,7 +160,8 @@ class Config:
         self.refresh_if_changed()
         if self.active_label:
             hit = self.account_by_label(self.active_label)
-            if hit:
+            # 停用的账户不能被 active 指名选中，否则「停用」毫无效果
+            if hit and hit.get("enabled", True):
                 return hit
         for a in self.accounts:
             if a.get("enabled", True):
@@ -220,7 +221,9 @@ class Config:
                 skipped += 1
                 continue
             existing.add(u)
-            self.accounts.append({
+            # 保留 APK 导出里的 token/sub/配额等字段，只规范化必需项
+            entry = dict(item)
+            entry.update({
                 "label": item.get("label") or f"账户 {u[:6]}",
                 "uuid": u,
                 "clientId": (item.get("clientId") or "").strip()
@@ -228,6 +231,7 @@ class Config:
                 "note": item.get("note", ""),
                 "enabled": item.get("enabled", True),
             })
+            self.accounts.append(entry)
             added += 1
         if not self.active_label and self.accounts:
             # 导入后没有指定 active，自动选第一个，否则看起来像「导入了
@@ -346,6 +350,7 @@ class Upstream:
                     "id": m.get("title") or m.get("model", ""),
                     "name": m.get("model") or m.get("name", ""),
                     "description": m.get("description", ""),
+                    "consumeRate": m.get("consumeRate", 1),
                 }
                 for m in arr if isinstance(m, dict)
             ]
