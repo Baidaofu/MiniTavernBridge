@@ -1,48 +1,41 @@
 # MiniTavern Bridge
 
-把 MiniTavern 会员代理包装成 **OpenAI 兼容端点**，让只能设置 Base URL / 请求头的
-客户端（如 pi）也能直接使用。Kelivo、SillyTavern / TauriTavern 支持自定义请求体，
-可以不用本工具直连上游，见 [直连上游](#直连上游不用本工具)。
+把 MiniTavern 的聊天接口包装成本地 OpenAI 兼容代理，让只能填写 Base URL 的客户端也能调用。
+仓库里是 Android 和 Windows 两个独立实现，互不依赖。
+
+---
+
+## 使用门槛（先看这里）
+
+这不是开箱即用的通用工具，**仓库不提供任何账户**。如果你不满足下面对应条件，
+这里的程序对你没有可用价值，可以不用继续往下看。
+
+| 端 | 必须条件 |
+|---|---|
+| **Android APK** | 设备**已 root**，且 MiniTavern App 处于登录状态。账户 uuid 靠转储运行中进程内存提取。|
+| **Windows** | 你已经持有**自己账户的 uuid 和 clientId**，能手动写进 `config.json`，或从安卓端导出后导入。|
+
+如果你期待的是「装上去就能直接聊天」的东西，这里没有你要的。
+
+---
+
+## 它做什么 / 不做什么
+
+- **只做协议转换**：在客户端和上游之间垫一层，把 uuid 写进请求体、补上 `X-Client-Id` 头、
+  维护模型列表和流式响应。
+- **不提供账号、不绕过付费、不批量注册**。uuid 是账户凭据，等同于密码，请自行保管。
+- 上游本身就是标准 OpenAI 流式接口。支持自定义请求头的客户端（Kelivo、SillyTavern 等）
+  可以不经过本工具直连，配置见 [windows/README.md](windows/README.md)。
 
 | | [android/](android/) | [windows/](windows/) |
 |---|---|---|
 | 语言 | Kotlin / Jetpack Compose | Python（零第三方依赖） |
-| 界面 | Material 3（MD3 Expressive 形状） | 终端 TUI / 命令行 |
-| 账户提取 | ✅ root 转储进程内存 | — （手动填 uuid） |
-| 本地代理 | ✅ 前台服务 | ✅ |
-| 流式 SSE | ✅ 透传 / 本地合成 | ✅ 透传 / 本地合成 |
-| 多账户 | ✅ UI 切换 | ✅ TUI 切换 / `--active` |
+| 界面 | Material 3 | tkinter GUI / 终端 TUI(废弃) / 命令行 |
+| 账户来源 | root 转储进程内存 | 手动填 uuid / 导入安卓导出的文件 |
+| 本地代理 | 前台服务 | 独立进程 |
+| 流式 SSE | 透传 / 本地合成 | 透传 / 本地合成 |
+| 多账户 | UI 切换 | GUI / TUI(废弃)  切换 |
 | 导入导出 | ✅ | ✅ |
-| 结构化日志 | ✅ 每次调用完整记录 | ✅ TUI 面板 |
-
----
-
-## 为什么需要这个
-
-MiniTavern 后端有三个特性让通用客户端接不上：
-
-| # | 后端要求 | 客户端限制 | 后果 |
-|---|---|---|---|
-| 1 | `GET /api/ai-proxy/models` 不存在 | 客户端靠它拉模型列表 | 列表永远为空 |
-| 2 | 必须带 `X-Client-Id` 头 | 大多支持 | 可解决 |
-| 3 | **`uuid` 必须在 JSON body 里** | pi 只能设 header，不能注入 body | **pi 无法解决**；Kelivo / SillyTavern 可以直连 |
-
-第 3 点对 pi 是死结。实测 8 种 header 名（`X-Uuid`、`X-Device-Uuid`、`X-Client-Uuid`、
-`uuid`、`X-Monitor-Uuid`、`X-Device-Id` 等）和 2 种 query 参数（`?uuid=`、
-`?deviceUuid=`）**全部无效**，后端一律返回 `uuid should not be empty`。
-
-Kelivo、SillyTavern / TauriTavern 自带 provider 级自定义 body 与 header，不需要这层
-转换，配置见 [直连上游](#直连上游不用本工具)。其余客户端在中间垫一层转换即可。
-
-### 认证模型的实测结论
-
-| 凭据 | 是否必需 | 说明 |
-|---|---|---|
-| `X-Client-Id` | **是** | 缺失或错误 → `用户不存在` (401)。在**三台不同设备的不同安装上实测完全相同**，是从 App 派生的常量 |
-| body `uuid` | **是** | **唯一的账户凭据**，等同密码 |
-| `Authorization: Bearer <JWT>` | **否** | 后端**完全忽略**。有效值、垃圾值、不传，三者行为一致 |
-
-因此客户端 **API Key 随便填**，token 过期也不影响任何调用。
 
 ---
 
@@ -50,27 +43,28 @@ Kelivo、SillyTavern / TauriTavern 自带 provider 级自定义 body 与 header�
 
 ### Windows
 
-带终端界面的版本（推荐），零第三方依赖：
+需要事先准备好 uuid。两种方式：
+
+1. **免环境 exe**：从 [Releases](https://github.com/Baidaofu/MiniTavernBridge/releases)
+   取 `mtbridge-gui.exe`，和 `config.json` 放同一目录后双击。没有 Python 也能运行，
+   无控制台窗口，界面跟随系统亮/暗主题。
+2. **源码**：零第三方依赖，Python 3.11+ 即可。
 
 ```bash
 cd windows
-copy config.example.json config.json    # 填入 uuid / clientId
-python mtbridge.py --check              # 自检
-python mtbridge_tui.py                   # 启动代理 + TUI
+copy config.example.json config.json    # 填入自己的 uuid / clientId
+python mtbridge.py --check              # 配置 / 网络 / 端口自检
+python mtbridge_gui.py                  # 桌面面板
+# 或 python mtbridge_tui.py             # 终端界面
+# 或 python mtbridge.py                 # 纯代理
 ```
 
-界面里可切换账户、改名、停用、导入导出。不想开界面（比如跑成服务）时：
+GUI 里可启停代理、切换/增删改账户、导入导出、刷新模型（显示配额倍率）、检测配额；
+账户 UUID 和模型 ID/名称单击即复制。详见 [windows/README.md](windows/README.md)。
 
-```bash
-python mtbridge.py                      # 纯命令行，等价于 TUI 的 --headless
-```
+### Android
 
-详见 [windows/TUI.md](windows/TUI.md)。
-
-### 安卓
-
-需要 root。从 [Releases](https://github.com/Baidaofu/MiniTavernBridge/releases) 下 APK
-安装，或自己构建：
+**需要 root。** 从 Releases 取 `app-debug.apk` 安装，或自行构建：
 
 ```bash
 cd android
@@ -78,13 +72,13 @@ cd android
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-启动后在**账户页**点「扫描设备」提取账户（已从首页移过来），再到首页点「启动代理」。
+启动后在**账户页**点「扫描设备」提取已登录账户的 uuid，再到首页点「启动代理」。
 
 <details>
-<summary>在 arm64 / Termux 上构建？</summary>
+<summary>arm64 / Termux 构建</summary>
 
-Gradle 默认从 Maven 拉的 `aapt2` 是 x86_64 二进制，arm64 上会报
-`Failed to start AAPT2 process`。改用系统自带的 aapt2 即可：
+Gradle 默认拉的 `aapt2` 是 x86_64 二进制，arm64 上会报 `Failed to start AAPT2 process`。
+改用系统自带的 aapt2：
 
 ```properties
 # ~/.gradle/gradle.properties
@@ -92,7 +86,7 @@ android.aapt2FromMavenOverride=/data/data/com.termux/files/usr/bin/aapt2
 ```
 </details>
 
-### 客户端配置（两边一致）
+### 客户端配置（两端一致）
 
 ```
 Base URL   http://127.0.0.1:8787/v1
@@ -100,145 +94,69 @@ API Key    任意字符串
 Path       /chat/completions
 ```
 
-端口在配置文件里改（安卓端固定 8787）。**注意同一台设备上只能跑一个实例**，
-两个都监听 8787 时后启动的那个会启动失败。
+端口可在 Windows 配置文件中修改，安卓端固定 8787。**同一台设备只能跑一个实例**，
+两个都监听 8787 时后启动的会失败。
 
 ---
 
-## 直连上游（不用本工具）
+## 关于 uuid
 
-Kelivo 和 SillyTavern / TauriTavern 支持在 provider 级别注入自定义 body 和 header，
-所以可以绕过本工具直接访问上游。上游本身就是标准 OpenAI 流式接口：
+MiniTavern 把本地数据全部加密（`apiSettings.json`、`userInfo.json` 是 AES，
+`SecureStore.xml` 是 EncryptedSharedPreferences），AES 口令在 Android Keystore 里不可导出，
+静态读文件走不通。
 
-```
-POST https://monitor.mini-tavern.com/api/ai-proxy/chat/completions
-Header  X-Client-Id: <clientId>     # 必需
-Body    uuid: <uuid>                # 必需
-Authorization: Bearer <任意>        # 后端忽略
-```
+安卓端的做法是转储运行中进程的内存：解析 `/proc/<pid>/maps` 挑出 Hermes GC 堆，
+导出后在 UTF-16 文本中匹配 JWT，解出 payload 里的 `uuid`。
+Windows 端没有这一步，需要你自己提供。
 
-`stream: true` 返回真正的 SSE（`chat.completion.chunk`），结尾没有 `data: [DONE]`，
-常见客户端都能正常收尾。根路径下没有 `/models`，模型列表只能手动填**完整名**。
-
-### Kelivo
-
-provider 里填：
-
-| 字段 | 值 |
-|---|---|
-| API Base URL | `https://monitor.mini-tavern.com/api/ai-proxy` |
-| API 路径 | `/chat/completions` |
-| Response API (/responses) | 关 |
-| API Key | 任意 |
-| 自定义请求 → Header | `X-Client-Id: <clientId>` |
-| 自定义请求 → Body | `uuid: "<uuid>"`（只留这一条） |
-| 模型 | 完整名，如 `deepseek/deepseek-v3.2-exp` |
-
-### SillyTavern / TauriTavern
-
-聊天补全源选 `Custom (OpenAI-compatible)`：
-
-| 字段 | 值 |
-|---|---|
-| Custom Endpoint (Base URL) | `https://monitor.mini-tavern.com/api/ai-proxy` |
-| Custom API Key | 任意 |
-| Enter a Model ID | `deepseek/deepseek-v3.2-exp` |
-| Additional Parameters → Include Request Headers | `X-Client-Id: <clientId>` |
-| Additional Parameters → Include Body Parameters | `uuid: "<uuid>"` |
-
-服务端会把 Base URL 和 `/chat/completions` 拼接，所以 **Base URL 不要带后缀**。
-
-> `uuid` 建议加引号，避免全数字时被 YAML/JSON 解析成数字。
+**uuid 等同于账户密码**，导出文件里包含它，请按敏感数据对待。
 
 ---
 
-## 账户 uuid 从哪来
+## 模型与配额
 
-MiniTavern 把本地数据全部加密：
+模型目录来自上游的 `/api/api-keys/list`，需要带 `X-Client-Id`；
+返回的 `title` 是内部短 id，`model` 是请求时必须使用的完整名。两端都做了自动转换，
+并在列表里显示配额消耗倍率（字段 `consumeRate`）。
 
-```
-files/settings/apiSettings.json   OpenSSL "Salted__" AES
-files/users/userInfo.json          同上
-shared_prefs/SecureStore.xml       EncryptedSharedPreferences
-```
+后端没有可用的配额查询接口，配额只能从任意一次对话响应的 `otherInfo` 里读取。
+因此「检测配额」会真实发送一次极小的请求，消耗至少 1 点额度。
 
-AES 口令在 Android Keystore 里，**不可导出**，静态读文件走不通。
-
-安卓版的做法是转储运行中进程的内存：解析 `/proc/<pid>/maps` 挑出
-`anon:hades-segment` / `anon:hermes-rt`（Hermes GC 堆），`dd` 导出后在
-UTF-16 文本中正则匹配 JWT，Base64 解出 payload 取 `uuid`。
-
-> Hermes 把 JS 字符串存为 UTF-16，这是能扫到明文的原因。
-
-Windows 版需要手动填 —— 可以用安卓端扫出来后复制。
-
----
-
-## 模型目录
-
-上游真实接口是：
-
-```
-GET https://monitor.mini-tavern.com/api/api-keys/list
-Header: X-Client-Id: <clientId>
-```
-
-返回 26 个模型（数量会变）。**不带 `X-Client-Id` 会返回空数组**（容易误判成「无模型接口」）。
-
-响应里 `title` 是内部短 id（`m1`、`tuzi-vision13`），`model` 是后端要求的完整名。
-后端**只认完整名**，传短 id 会报 `model_not_found`。两个实现都做了自动转换。
-
-上游这一个接口里**两种名字都给了**（`title` 短 id、`name`/`model` 全名），
-所以不经过本工具也能直接查：
-
-```bash
-curl -s https://monitor.mini-tavern.com/api/api-keys/list \
-     -H "X-Client-Id: <clientId>"
-```
-
-`GET /v1/models` 的 `id` 用**真实全名**（如 `deepseek/deepseek-v3.2-exp`），
-短 id 放在 `mtb_id` 字段；发请求时两种写法都接受。
+`GET /v1/models` 的 `id` 用完整模型名，短 id 放在 `mtb_id` 字段。
 
 ---
 
 ## 已知限制
 
-- **流式是“能用但有条件”。** 客户端开 `stream: true` 后：上游若返回
-  `text/event-stream` 就逐块原样透传；若只给整包 JSON、或直接拒绝 `stream` 参数，
-  代理会本地切成 `chat.completion.chunk` 再下发，因此客户端**总能拿到 SSE**。
-  反向也处理了：客户端要 JSON 而上游给了 SSE，会累积拼回一份完整响应。
-  注意合成流的节奏与上游真实生成速度无关（一次性补齐），且 chunk 大小固定 64 字符。
-- **上下文窗口未知**，客户端配置需手填。
-- **`gpt-5.4` / `gpt-6-astra` 有隐藏注入。** 同样短请求，这两个模型
-  `prompt_tokens` 约 550，而 `deepseek` 只有 9、`gemini` 约 44。服务端为这两条
-  线路注入了约 540 token 的 system prompt，**不是「官方 gpt-5.4」**。
-- **配额重置时间后端未提供。** `GET /api/users/getAdQuota` 返回 `{"quota":0,"time":0}`。
-- **配额按账户独立**，多账户各 100，但都是免费试用额度，实测 `subscriptionExpiry`
-  约 28 天后到期，到期后行为未知。
+- **流式是「能用但有条件」**：上游返回 SSE 时逐块透传；只给整包 JSON 时代理本地切成
+  `chat.completion.chunk`。合成流的节奏与真实生成速度无关，chunk 大小固定 64 字符。
+- **上下文窗口未知**，客户端需手填。
+- **配额重置时间后端未提供**；配额按账户独立，到期后行为未知。
 - **安卓版需要 root**，且 MiniTavern 必须处于登录状态。
+- 部分模型（`gpt-5.4` / `gpt-6-astra`）的服务端 prompt 注入量与常规模型明显不同，
+  不应视为对应官方模型。
 
 ---
 
-## 配额
+## 构建
 
-后端**没有可用的配额查询接口**——`GET /api/users/getAdQuota` 返回
-`{"quota":0,"time":0}` 且带 `errorCode: GET_AD_QUOTA_FAILED`。
+仓库自带 GitHub Actions：push 到 main 时并行构建 Android debug APK 与 Windows 单文件 exe，
+产物保存在 Actions artifacts（30 天）。发布包由 Releases 提供。
 
-配额的唯一来源是**任意一次对话响应里的 `otherInfo`**：
+```bash
+# Android
+cd android && ./gradlew assembleDebug
 
-```json
-"otherInfo": { "totalQuota": 100, "usedQuota": 2, "model": "m1" }
+# Windows exe（需要 PyInstaller）
+cd windows && python -m PyInstaller --onefile --windowed --name mtbridge-gui mtbridge_gui.py
 ```
-
-所以查询手段是发一个 `max_tokens: 1` 的极小请求再读 `otherInfo`。
-安卓首页的配额卡片、windows TUI 的账户表都会自动这么做。
 
 ---
 
 ## 合规提示
 
-本工具绕过 MiniTavern App 的设备签名校验（后端 `/api/auth/app/metrics`
-持续统计 `signature_ok` / `signature_fail` / `nonce_replay`）。
-**这实质上违反其服务条款，封号风险由使用者自行承担。**
+本工具会绕过 MiniTavern App 的设备签名校验，其服务端持续统计
+`signature_ok` / `signature_fail` / `nonce_replay`。**这实质上违反其服务条款，
+封号风险由使用者自行承担。**
 
 仅供个人学习与研究。
